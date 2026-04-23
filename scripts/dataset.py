@@ -14,6 +14,10 @@ def _collect_files_with_extensions(directory, patterns):
         files.extend(glob.glob(f"{directory}/{pattern}"))
     return sorted(files)
 
+
+def _stem(path):
+    return Path(path).stem.lower()
+
 class FUSegDataset(Dataset):
     """Binary segmentation dataset for FUSeg"""
     def __init__(self, image_dir, mask_dir, transform=None):
@@ -34,6 +38,14 @@ class FUSegDataset(Dataset):
                 mask_dir,
                 ['*.png', '*.jpg', '*.jpeg', '*.PNG', '*.JPG', '*.JPEG']
             )
+
+        # Pair by filename stem to avoid index errors when one folder has extras.
+        image_map = {_stem(p): p for p in self.images}
+        mask_map = {_stem(p): p for p in self.masks}
+        common_keys = sorted(set(image_map.keys()) & set(mask_map.keys()))
+
+        self.images = [image_map[k] for k in common_keys]
+        self.masks = [mask_map[k] for k in common_keys]
 
         # Raise an explicit error so users can fix path mounts quickly instead of getting
         # a DataLoader "num_samples=0" error later.
