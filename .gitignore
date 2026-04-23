@@ -1,0 +1,7 @@
+.venv/
+pycache/
+*.pyc
+.ipynb_checkpoints/
+outputs/
+*.pth
+.DS_Store

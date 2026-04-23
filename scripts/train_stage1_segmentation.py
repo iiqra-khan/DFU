@@ -1,0 +1,97 @@
+import torch
+import torch.nn as nn
+import segmentation_models_pytorch as smp
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+import os
+
+from dataset import FUSegDataset, get_transforms
+from config import Config
+
+def train_segmentation(config):
+    """Stage 1: Train segmentation on FUSeg"""
+
+    # Create output directory
+    os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+
+    # Model
+    model = smp.Unet(
+        encoder_name=config.BACKBONE,
+        encoder_weights=config.ENCODER_WEIGHTS,
+        in_channels=3,
+        classes=1
+    ).to(config.DEVICE)
+
+    # Data
+    train_dataset = FUSegDataset(
+        f"{config.FUSEG_PATH}/train/images",
+        f"{config.FUSEG_PATH}/train/labels",
+        transform=get_transforms('train')
+    )
+    val_dataset = FUSegDataset(
+        f"{config.FUSEG_PATH}/validation/images",
+        f"{config.FUSEG_PATH}/validation/labels",
+        transform=get_transforms('val')
+    )
+
+    train_loader = DataLoader(train_dataset, batch_size=config.BATCH_SIZE,
+                              shuffle=True, num_workers=config.NUM_WORKERS)
+    val_loader = DataLoader(val_dataset, batch_size=config.BATCH_SIZE)
+
+    # Loss & optimizer
+    criterion = smp.losses.DiceLoss(mode='binary')
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.LR_STAGE1)
+
+    best_val_dice = 0.0
+
+    # Training loop
+    for epoch in range(config.EPOCHS_STAGE1):
+        model.train()
+        epoch_loss = 0
+
+        for images, masks in tqdm(train_loader, desc=f"Epoch {epoch+1} [Train]"):
+            images = images.to(config.DEVICE)
+            masks = masks.to(config.DEVICE)
+
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = criterion(outputs, masks)
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item()
+
+        # Validation
+        model.eval()
+        val_dice = 0.0
+        with torch.no_grad():
+            for images, masks in tqdm(val_loader, desc=f"Epoch {epoch+1} [Val]"):
+                images = images.to(config.DEVICE)
+                masks = masks.to(config.DEVICE)
+
+                outputs = model(images)
+                # Dice score for binary segmentation
+                probs = torch.sigmoid(outputs)
+                preds = (probs > 0.5).float()
+                intersection = (preds * masks).sum()
+                union = preds.sum() + masks.sum()
+                dice = (2 * intersection) / (union + 1e-6)
+                val_dice += dice.item()
+
+        avg_train_loss = epoch_loss / len(train_loader)
+        avg_val_dice = val_dice / len(val_loader)
+
+        print(f"Epoch {epoch+1}/{config.EPOCHS_STAGE1}: "
+              f"Train Loss: {avg_train_loss:.4f}, Val Dice: {avg_val_dice:.4f}")
+
+        # Save best model
+        if avg_val_dice > best_val_dice:
+            best_val_dice = avg_val_dice
+            torch.save(model.encoder.state_dict(),
+                       f"{config.OUTPUT_DIR}/encoder_stage1.pth")
+            print(f"  -> Saved best encoder (Dice: {best_val_dice:.4f})")
+
+    print(f"✅ Stage 1 complete. Best Val Dice: {best_val_dice:.4f}")
+
+if __name__ == "__main__":
+    train_segmentation(Config)
