@@ -5,8 +5,30 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 import os
+import timm
 
-def generate_xai_explanations(model, test_loader, config, num_samples=5):
+try:
+    from IPython.display import display
+except Exception:
+    display = None
+
+
+def load_stage2_model(config, model_path=None):
+    """Load the Stage 2 classifier checkpoint for XAI."""
+    if model_path is None:
+        model_path = os.path.join(config.OUTPUT_DIR, 'best_wagner_model.pth')
+
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
+
+    model = timm.create_model(config.BACKBONE, pretrained=False, num_classes=4)
+    state_dict = torch.load(model_path, map_location=config.DEVICE)
+    model.load_state_dict(state_dict)
+    model = model.to(config.DEVICE)
+    model.eval()
+    return model
+
+def generate_xai_explanations(model, test_loader, config, num_samples=5, display_inline=True):
     """Generate Integrated Gradients explanations for model predictions"""
 
     model.eval()
@@ -31,7 +53,7 @@ def generate_xai_explanations(model, test_loader, config, num_samples=5):
                 break
 
             img = images[i:i+1]  # Keep batch dimension
-            label = labels[i:i+1]
+            label = int(labels[i].item())
 
             # Generate attributions
             attributions = ig.attribute(img, target=label, n_steps=50)
@@ -60,7 +82,7 @@ def generate_xai_explanations(model, test_loader, config, num_samples=5):
 
             plt.subplot(1, 3, 1)
             plt.imshow(original_img)
-            plt.title(f"Input Image\nTrue Grade: {label.item()+1}")
+            plt.title(f"Input Image\nTrue Grade: {label + 1}")
             plt.axis('off')
 
             plt.subplot(1, 3, 2)
@@ -76,13 +98,29 @@ def generate_xai_explanations(model, test_loader, config, num_samples=5):
             plt.axis('off')
 
             plt.tight_layout()
-            plt.savefig(os.path.join(xai_dir, f'xai_sample_{samples_processed+1}.png'),
-                       dpi=150, bbox_inches='tight')
+            output_path = os.path.join(xai_dir, f'xai_sample_{samples_processed+1}.png')
+            plt.savefig(output_path, dpi=150, bbox_inches='tight')
+
+            if display_inline and display is not None:
+                display(Image.open(output_path))
+
             plt.close()
 
             samples_processed += 1
 
     print(f"✅ Generated {samples_processed} XAI explanations in {xai_dir}")
+
+
+def run_stage2_xai(config, split='valid', num_samples=5, batch_size=4, model_path=None, display_inline=True):
+    """One-call helper to load Stage 2 and save XAI outputs."""
+    from torch.utils.data import DataLoader
+    from dataset import DPMDataset, get_transforms
+
+    model = load_stage2_model(config, model_path=model_path)
+    dataset = DPMDataset(config.DPM_PATH, split=split, transform=get_transforms('val'))
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=getattr(config, 'NUM_WORKERS', 0))
+
+    generate_xai_explanations(model, loader, config, num_samples=num_samples, display_inline=display_inline)
 
 def get_predictions_and_attributions(model, test_loader, config):
     """Get model predictions and attributions for analysis"""
@@ -129,3 +167,5 @@ if __name__ == "__main__":
     print("XAI analysis module ready. Import and use:")
     print("  from xai_analysis import generate_xai_explanations")
     print("  generate_xai_explanations(model, test_loader, config)")
+    print("  from xai_analysis import run_stage2_xai")
+    print("  run_stage2_xai(config)")

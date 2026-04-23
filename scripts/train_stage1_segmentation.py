@@ -8,6 +8,12 @@ import os
 from dataset import FUSegDataset, get_transforms
 from config import Config
 
+
+def _ensure_channel_dim(mask_tensor):
+    if mask_tensor.dim() == 3:
+        return mask_tensor.unsqueeze(1)
+    return mask_tensor
+
 def train_segmentation(config):
     """Stage 1: Train segmentation on FUSeg"""
 
@@ -51,7 +57,7 @@ def train_segmentation(config):
 
         for images, masks in tqdm(train_loader, desc=f"Epoch {epoch+1} [Train]"):
             images = images.to(config.DEVICE)
-            masks = masks.to(config.DEVICE)
+            masks = _ensure_channel_dim(masks.to(config.DEVICE).float())
 
             optimizer.zero_grad()
             outputs = model(images)
@@ -67,16 +73,20 @@ def train_segmentation(config):
         with torch.no_grad():
             for images, masks in tqdm(val_loader, desc=f"Epoch {epoch+1} [Val]"):
                 images = images.to(config.DEVICE)
-                masks = masks.to(config.DEVICE)
+                masks = _ensure_channel_dim(masks.to(config.DEVICE).float())
+
+                # Keep validation strictly binary in case any augmentation or loader
+                # preserves grayscale mask values.
+                masks = (masks > 0.5).float()
 
                 outputs = model(images)
                 # Dice score for binary segmentation
                 probs = torch.sigmoid(outputs)
                 preds = (probs > 0.5).float()
-                intersection = (preds * masks).sum()
-                union = preds.sum() + masks.sum()
+                intersection = (preds * masks).sum(dim=(1, 2, 3))
+                union = preds.sum(dim=(1, 2, 3)) + masks.sum(dim=(1, 2, 3))
                 dice = (2 * intersection) / (union + 1e-6)
-                val_dice += dice.item()
+                val_dice += dice.mean().item()
 
         avg_train_loss = epoch_loss / len(train_loader)
         avg_val_dice = val_dice / len(val_loader)
