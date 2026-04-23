@@ -60,6 +60,7 @@ class FUSegDataset(Dataset):
     def __getitem__(self, idx):
         image = np.array(Image.open(self.images[idx]).convert('RGB'))
         mask = np.array(Image.open(self.masks[idx]).convert('L'))
+        mask = (mask > 0).astype(np.float32)
 
         if self.transform:
             aug = self.transform(image=image, mask=mask)
