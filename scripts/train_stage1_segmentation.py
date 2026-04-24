@@ -4,6 +4,7 @@ import segmentation_models_pytorch as smp
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import os
+import math
 
 from dataset import FUSegDataset, get_transforms
 from config import Config
@@ -48,7 +49,8 @@ def train_segmentation(config):
     criterion = smp.losses.DiceLoss(mode='binary')
     optimizer = torch.optim.Adam(model.parameters(), lr=config.LR_STAGE1)
 
-    best_val_dice = 0.0
+    best_val_dice = -math.inf
+    epochs_without_improvement = 0
 
     # Training loop
     for epoch in range(config.EPOCHS_STAGE1):
@@ -94,12 +96,24 @@ def train_segmentation(config):
         print(f"Epoch {epoch+1}/{config.EPOCHS_STAGE1}: "
               f"Train Loss: {avg_train_loss:.4f}, Val Dice: {avg_val_dice:.4f}")
 
-        # Save best model
-        if avg_val_dice > best_val_dice:
+        # Save best model and track improvement for early stopping.
+        if avg_val_dice > (best_val_dice + config.EARLY_STOPPING_MIN_DELTA):
             best_val_dice = avg_val_dice
+            epochs_without_improvement = 0
             torch.save(model.encoder.state_dict(),
                        f"{config.OUTPUT_DIR}/encoder_stage1.pth")
             print(f"  -> Saved best encoder (Dice: {best_val_dice:.4f})")
+        else:
+            epochs_without_improvement += 1
+
+        if (config.USE_EARLY_STOPPING and
+                epochs_without_improvement >= config.EARLY_STOPPING_PATIENCE_STAGE1):
+            print(
+                "  -> Early stopping triggered "
+                f"(no Dice improvement > {config.EARLY_STOPPING_MIN_DELTA} for "
+                f"{config.EARLY_STOPPING_PATIENCE_STAGE1} epochs)"
+            )
+            break
 
     print(f"✅ Stage 1 complete. Best Val Dice: {best_val_dice:.4f}")
 

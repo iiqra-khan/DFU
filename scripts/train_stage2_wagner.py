@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader
 from sklearn.metrics import accuracy_score, f1_score
 import os
 from tqdm import tqdm
+import math
 
 from dataset import DPMDataset, get_transforms
 from config import Config
@@ -103,7 +104,8 @@ def train_wagner_grading(config):
 
     wandb_run = _maybe_init_wandb(config)
 
-    best_f1 = 0.0
+    best_f1 = -math.inf
+    epochs_without_improvement = 0
 
     for epoch in range(config.EPOCHS_STAGE2):
         # Train
@@ -149,14 +151,26 @@ def train_wagner_grading(config):
                 'val_f1': f1,
             })
 
-        if f1 > best_f1:
+        if f1 > (best_f1 + config.EARLY_STOPPING_MIN_DELTA):
             best_f1 = f1
+            epochs_without_improvement = 0
             torch.save(model.state_dict(),
                        f"{config.OUTPUT_DIR}/best_wagner_model.pth")
             print(f"  -> Saved best model (F1: {best_f1:.4f})")
 
             if wandb_run is not None:
                 wandb.run.summary['best_val_f1'] = best_f1
+        else:
+            epochs_without_improvement += 1
+
+        if (config.USE_EARLY_STOPPING and
+                epochs_without_improvement >= config.EARLY_STOPPING_PATIENCE_STAGE2):
+            print(
+                "  -> Early stopping triggered "
+                f"(no F1 improvement > {config.EARLY_STOPPING_MIN_DELTA} for "
+                f"{config.EARLY_STOPPING_PATIENCE_STAGE2} epochs)"
+            )
+            break
 
     print(f"✅ Stage 2 complete. Best Val F1: {best_f1:.4f}")
 

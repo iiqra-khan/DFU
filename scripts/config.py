@@ -16,6 +16,12 @@ class Config:
     LR_STAGE1 = 1e-4
     LR_STAGE2 = 1e-5
 
+    # Early stopping
+    USE_EARLY_STOPPING = True
+    EARLY_STOPPING_MIN_DELTA = 1e-4
+    EARLY_STOPPING_PATIENCE_STAGE1 = 5
+    EARLY_STOPPING_PATIENCE_STAGE2 = 7
+
     # Hardware
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     NUM_WORKERS = 4
