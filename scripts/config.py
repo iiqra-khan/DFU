@@ -6,7 +6,7 @@ class Config:
     DPM_PATH = '../data/dpm_v3'
 
     # Model
-    BACKBONE = 'resnet50'  # or 'efficientnet-b4'
+    BACKBONE = 'efficientnet-b4'
     ENCODER_WEIGHTS = 'imagenet'
 
     # Training
