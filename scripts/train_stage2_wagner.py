@@ -45,7 +45,7 @@ def _maybe_init_wandb(config):
         entity=getattr(config, 'WANDB_ENTITY', None),
         name=getattr(config, 'WANDB_RUN_NAME', None),
         config={
-            'backbone': config.BACKBONE,
+            'backbone': config.TIMM_BACKBONE,
             'batch_size': config.BATCH_SIZE,
             'epochs_stage2': config.EPOCHS_STAGE2,
             'lr_stage2': config.LR_STAGE2,
@@ -61,7 +61,7 @@ def train_wagner_grading(config):
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
 
     # Load base model
-    model = timm.create_model(config.BACKBONE, pretrained=False, num_classes=4)
+    model = timm.create_model(config.TIMM_BACKBONE, pretrained=False, num_classes=4)
 
     # Load encoder weights from Stage 1
     encoder_path = f"{config.OUTPUT_DIR}/encoder_stage1.pth"
@@ -84,7 +84,7 @@ def train_wagner_grading(config):
             param.requires_grad = False
 
     # For non-ResNet backbones, apply a generic head-only fine-tuning policy.
-    if not _is_resnet_backbone(config.BACKBONE):
+    if not _is_resnet_backbone(config.TIMM_BACKBONE):
         _apply_generic_freeze_for_non_resnet(model)
 
     # Data

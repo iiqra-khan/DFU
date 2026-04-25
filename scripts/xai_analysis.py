@@ -21,7 +21,7 @@ def load_stage2_model(config, model_path=None):
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
 
-    model = timm.create_model(config.BACKBONE, pretrained=False, num_classes=4)
+    model = timm.create_model(config.TIMM_BACKBONE, pretrained=False, num_classes=4)
     state_dict = torch.load(model_path, map_location=config.DEVICE)
     model.load_state_dict(state_dict)
     model = model.to(config.DEVICE)

@@ -7,6 +7,7 @@ class Config:
 
     # Model
     BACKBONE = 'efficientnet-b4'
+    TIMM_BACKBONE = 'efficientnet_b4'
     ENCODER_WEIGHTS = 'imagenet'
 
     # Training
