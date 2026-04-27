@@ -63,11 +63,18 @@ def train_wagner_grading(config):
     # Load base model
     model = timm.create_model(config.TIMM_BACKBONE, pretrained=False, num_classes=4)
 
-    # Load encoder weights from Stage 1
-    encoder_path = f"{config.OUTPUT_DIR}/encoder_stage1.pth"
-    if not os.path.exists(encoder_path):
-        raise FileNotFoundError(f"Encoder weights not found at {encoder_path}. "
-                                "Run Stage 1 training first.")
+    # Load encoder weights from Stage 1.
+    # Support both the new SegFormer filename and the legacy filename.
+    encoder_candidates = [
+        f"{config.OUTPUT_DIR}/encoder_pretrained.pth",
+        f"{config.OUTPUT_DIR}/encoder_stage1.pth",
+    ]
+    encoder_path = next((p for p in encoder_candidates if os.path.exists(p)), None)
+    if encoder_path is None:
+        raise FileNotFoundError(
+            "Encoder weights not found. Checked: "
+            f"{encoder_candidates}. Run Stage 1 training first."
+        )
 
     pretrained_dict = torch.load(encoder_path, map_location=config.DEVICE)
     model_dict = model.state_dict()
