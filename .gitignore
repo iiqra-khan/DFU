@@ -5,3 +5,8 @@ pycache/
 outputs/
 *.pth
 .DS_Store
+run_instr.md
+scripts.zip
+test.md
+README.md
+CLAUDE.md

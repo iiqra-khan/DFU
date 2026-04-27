@@ -6,16 +6,30 @@ class Config:
     DPM_PATH = '../data/dpm_v3'
 
     # Model
-    BACKBONE = 'efficientnet-b4'
+    BACKBONE = 'efficientnet-b4'  # For Stage 2 only; Stage 1 uses SegFormer-B2
     TIMM_BACKBONE = 'efficientnet_b4'
     ENCODER_WEIGHTS = 'imagenet'
+    
+    # Stage 1: SegFormer-B2
+    SEGFORMER_MODEL = 'nvidia/segformer-b2-finetuned-ade-512-512'
+    SEGFORMER_NUM_LABELS = 1
 
     # Training
     BATCH_SIZE = 16
-    EPOCHS_STAGE1 = 30
+    EPOCHS_STAGE1 = 20
     EPOCHS_STAGE2 = 50
-    LR_STAGE1 = 1e-4
+    LR_STAGE1 = 3e-4
     LR_STAGE2 = 1e-5
+    WEIGHT_DECAY = 1e-4
+    
+    # Optimizer & Scheduler
+    OPTIMIZER_STAGE1 = 'adamw'
+    USE_SCHEDULER_STAGE1 = True
+    SCHEDULER_STAGE1 = 'cosine'
+    
+    # Loss for Stage 1
+    LOSS_STAGE1 = 'dice_bce'
+    LOSS_WEIGHTS = {'bce': 0.3, 'dice': 0.7}
 
     # Early stopping
     USE_EARLY_STOPPING = True

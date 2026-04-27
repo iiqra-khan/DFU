@@ -101,15 +101,18 @@ class DPMDataset(Dataset):
 def get_transforms(stage='train'):
     if stage == 'train':
         return A.Compose([
-            A.Resize(224, 224),
+            A.Resize(512, 512),  # SegFormer expects 512x512
             A.HorizontalFlip(p=0.5),
-            A.RandomBrightnessContrast(p=0.3),
+            A.VerticalFlip(p=0.5),
+            A.Rotate(limit=30, p=0.5),
+            A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.0, hue=0.0, p=0.5),
+            A.GaussianBlur(blur_limit=(3, 7), p=0.3),
             A.Normalize(),
             ToTensorV2()
         ])
     else:
         return A.Compose([
-            A.Resize(224, 224),
+            A.Resize(512, 512),  # SegFormer expects 512x512
             A.Normalize(),
             ToTensorV2()
         ])
