@@ -5,7 +5,8 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 import os
-import timm
+
+from train_stage2_wagner import SegFormerWagnerClassifier
 
 try:
     from IPython.display import display
@@ -16,12 +17,14 @@ except Exception:
 def load_stage2_model(config, model_path=None):
     """Load the Stage 2 classifier checkpoint for XAI."""
     if model_path is None:
-        model_path = os.path.join(config.OUTPUT_DIR, 'best_wagner_model.pth')
+        model_path = os.path.join(config.OUTPUT_DIR, 'best_wagner_model_two_stage.pth')
+        if not os.path.exists(model_path):
+            model_path = os.path.join(config.OUTPUT_DIR, 'best_wagner_model.pth')
 
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
 
-    model = timm.create_model(config.TIMM_BACKBONE, pretrained=False, num_classes=4)
+    model = SegFormerWagnerClassifier(num_classes=getattr(config, 'SEGFORMER_NUM_CLASSES_STAGE2', 4))
     state_dict = torch.load(model_path, map_location=config.DEVICE)
     model.load_state_dict(state_dict)
     model = model.to(config.DEVICE)

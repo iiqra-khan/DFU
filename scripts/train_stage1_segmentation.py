@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torch.cuda.amp import autocast, GradScaler
 from transformers import SegformerForSemanticSegmentation
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -72,6 +73,18 @@ def train_segmentation(config):
         num_labels=config.SEGFORMER_NUM_LABELS
     ).to(config.DEVICE)
 
+    # Enable gradient checkpointing if configured (saves memory at cost of compute)
+    if getattr(config, 'GRADIENT_CHECKPOINTING', False):
+        try:
+            model.model.gradient_checkpointing_enable()
+            print("Enabled gradient checkpointing on SegFormer model")
+        except Exception:
+            pass
+
+    # AMP scaler (optional)
+    scaler = GradScaler() if getattr(config, 'USE_AMP', False) else None
+    accum_steps = getattr(config, 'GRADIENT_ACCUMULATION_STEPS', 1)
+
     # Data
     train_dataset = FUSegDataset(
         f"{config.FUSEG_PATH}/train/images",
@@ -130,17 +143,40 @@ def train_segmentation(config):
         model.train()
         epoch_loss = 0.0
 
-        for images, masks in tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.EPOCHS_STAGE1} [Train]"):
+        optimizer.zero_grad()
+        for step_idx, (images, masks) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}/{config.EPOCHS_STAGE1} [Train]")):
             images = images.to(config.DEVICE)
             masks = _ensure_channel_dim(masks.to(config.DEVICE).float())
 
-            optimizer.zero_grad()
-            outputs = model(images)
-            loss = criterion(outputs, masks)
-            loss.backward()
-            optimizer.step()
+            with autocast(enabled=getattr(config, 'USE_AMP', False)):
+                outputs = model(images)
+                loss = criterion(outputs, masks) / accum_steps
 
-            epoch_loss += loss.item()
+            if scaler is not None:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
+
+            # Step optimizer when we've accumulated enough micro-batches
+            if (step_idx + 1) % accum_steps == 0:
+                if scaler is not None:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
+                optimizer.zero_grad()
+
+            # Maintain epoch loss as sum of original (pre-accum) losses
+            epoch_loss += loss.item() * accum_steps
+
+        # If number of steps was not divisible by accum_steps, do a final step
+        if (step_idx + 1) % accum_steps != 0:
+            if scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+            optimizer.zero_grad()
 
         avg_train_loss = epoch_loss / len(train_loader)
 
@@ -153,7 +189,8 @@ def train_segmentation(config):
                 masks = _ensure_channel_dim(masks.to(config.DEVICE).float())
                 masks = (masks > 0.5).float()
 
-                outputs = model(images)
+                with autocast(enabled=getattr(config, 'USE_AMP', False)):
+                    outputs = model(images)
                 # Dice score for binary segmentation
                 probs = torch.sigmoid(outputs)
                 preds = (probs > 0.5).float()

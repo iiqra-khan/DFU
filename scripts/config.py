@@ -19,9 +19,10 @@ class Config:
     CLASS_WEIGHTS_STAGE2 = torch.tensor([1.0, 1.2, 1.5, 1.8])
 
     # Training
-    BATCH_SIZE = 16
+    # Default batch size (reduce if OOMs occur). Adjust with GRADIENT_ACCUMULATION_STEPS
+    BATCH_SIZE = 2
     EPOCHS_STAGE1 = 20
-    EPOCHS_STAGE2 = 50
+    EPOCHS_STAGE2 = 30
     LR_STAGE1 = 3e-4
     LR_STAGE2 = 1e-5
     WEIGHT_DECAY = 1e-4
@@ -59,6 +60,16 @@ class Config:
     # Hardware
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     NUM_WORKERS = 4
+
+    # Memory / performance knobs
+    # Enable gradient checkpointing on transformer backbone to trade compute for memory
+    GRADIENT_CHECKPOINTING = True
+
+    # Mixed precision (automatic mixed precision) to save memory and speed up training
+    USE_AMP = True
+
+    # Gradient accumulation to achieve larger effective batch sizes with small per-step batches
+    GRADIENT_ACCUMULATION_STEPS = 2
 
     # Output
     OUTPUT_DIR = './outputs'

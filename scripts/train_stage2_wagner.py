@@ -15,8 +15,8 @@ Key features:
 
 import torch
 import torch.nn as nn
+from torch.cuda.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
-from transformers import SegformerForSemanticSegmentation
 from sklearn.metrics import (
     accuracy_score, 
     f1_score, 
@@ -28,12 +28,13 @@ from tqdm import tqdm
 import math
 import json
 import numpy as np
+import importlib
 
 from dataset import DPMDataset, get_transforms
 from config import Config
 
 try:
-    import wandb
+    wandb = importlib.import_module("wandb")
 except Exception:
     wandb = None
 
@@ -47,16 +48,19 @@ class SegFormerWagnerClassifier(nn.Module):
     
     def __init__(self, num_classes=4, encoder_weights=None):
         super().__init__()
+
+        transformers_module = importlib.import_module("transformers")
+        segformer_model_cls = getattr(transformers_module, "SegformerModel", None)
+        if segformer_model_cls is None:
+            raise ImportError(
+                "transformers is required for Stage 2. Install it with `pip install transformers`."
+            )
         
-        # Load SegFormer model pretrained on ADE segmentation
-        self.encoder = SegformerForSemanticSegmentation.from_pretrained(
-            Config.SEGFORMER_MODEL,
-            ignore_mismatched_sizes=True,
-            num_labels=1  # Dummy, will be replaced
-        )
+        # Load the encoder-only SegFormer backbone to avoid decoder warnings.
+        self.backbone = segformer_model_cls.from_pretrained(Config.SEGFORMER_MODEL)
         
         # Get encoder hidden size (for SegFormer-B2: 768)
-        self.hidden_size = self.encoder.config.hidden_sizes[-1]  # Last layer hidden size
+        self.hidden_size = self.backbone.config.hidden_sizes[-1]  # Last layer hidden size
         
         # Classification head: global avg pool + FC
         self.pool = nn.AdaptiveAvgPool2d(1)
@@ -74,46 +78,38 @@ class SegFormerWagnerClassifier(nn.Module):
     def _load_encoder_weights(self, encoder_weights):
         """Load pretrained Stage 1 encoder weights."""
         encoder_state_dict = torch.load(encoder_weights, map_location='cpu')
-        
-        # Extract only encoder part (ignore decoder keys like 'decode_head')
-        encoder_state_dict = {
-            k.replace('encoder.', ''): v 
-            for k, v in encoder_state_dict.items() 
-            if k.startswith('encoder.')
-        }
-        
-        # Try to load; ignore mismatched keys for non-encoder parts
         try:
-            self.encoder.load_state_dict(encoder_state_dict, strict=False)
+            missing_keys, unexpected_keys = self.backbone.encoder.load_state_dict(
+                encoder_state_dict,
+                strict=False,
+            )
             print(f"✅ Loaded Stage 1 encoder weights from {encoder_weights}")
+            if missing_keys:
+                print(f"   Missing keys: {len(missing_keys)}")
+            if unexpected_keys:
+                print(f"   Unexpected keys: {len(unexpected_keys)}")
         except Exception as e:
             print(f"⚠️ Error loading encoder weights: {e}")
     
     def get_encoder_blocks(self):
         """Get encoder block modules for progressive unfreezing."""
         blocks = []
-        # SegFormer encoder structure: encoder.block[0-3]
-        for i in range(4):  # SegFormer-B2 has 4 encoder stages
-            if hasattr(self.encoder, 'segformer') and hasattr(self.encoder.segformer, 'encoder'):
-                block = self.encoder.segformer.encoder.block[i]
-                blocks.append(block)
+        for i in range(len(self.backbone.encoder.block)):
+            blocks.append(self.backbone.encoder.block[i])
         return blocks
     
     def freeze_encoder(self):
         """Freeze all encoder parameters."""
-        if hasattr(self.encoder, 'segformer'):
-            for param in self.encoder.segformer.parameters():
-                param.requires_grad = False
+        for param in self.backbone.encoder.parameters():
+            param.requires_grad = False
     
     def unfreeze_block(self, block_idx):
         """Unfreeze specific encoder block by index."""
         try:
-            if hasattr(self.encoder, 'segformer'):
-                if hasattr(self.encoder.segformer, 'encoder'):
-                    block = self.encoder.segformer.encoder.block[block_idx]
-                    for param in block.parameters():
-                        param.requires_grad = True
-                    return True
+            block = self.backbone.encoder.block[block_idx]
+            for param in block.parameters():
+                param.requires_grad = True
+            return True
         except (AttributeError, IndexError):
             pass
         return False
@@ -121,8 +117,8 @@ class SegFormerWagnerClassifier(nn.Module):
     def forward(self, x):
         """Forward pass through encoder and classifier head."""
         # SegFormer encoder output
-        encoder_output = self.encoder.segformer.encoder(x)  # Tuple of hidden states
-        last_hidden_state = encoder_output[-1]  # Last layer features: (B, C, H, W)
+        encoder_output = self.backbone(pixel_values=x, output_hidden_states=True)
+        last_hidden_state = encoder_output.hidden_states[-1]  # (B, C, H, W)
         
         # Global average pooling: (B, C, H, W) -> (B, C)
         pooled = self.pool(last_hidden_state).squeeze(-1).squeeze(-1)
@@ -178,21 +174,48 @@ def train_epoch(model, train_loader, criterion, optimizer, device):
     epoch_loss = 0.0
     all_preds, all_labels = [], []
 
-    for images, labels in tqdm(train_loader, desc="Training"):
+    # Support AMP and gradient accumulation via config passed on model object (or global Config)
+    config = getattr(model, '_training_config', None)
+    use_amp = getattr(config, 'USE_AMP', False) if config is not None else False
+    accum_steps = getattr(config, 'GRADIENT_ACCUMULATION_STEPS', 1) if config is not None else 1
+    scaler = getattr(model, '_amp_scaler', None)
+
+    optimizer.zero_grad()
+    for step_idx, (images, labels) in enumerate(tqdm(train_loader, desc="Training")):
         images = images.to(device)
         labels = labels.to(device)
 
-        optimizer.zero_grad()
-        logits = model(images)
-        loss = criterion(logits, labels)
-        loss.backward()
-        optimizer.step()
+        with autocast(enabled=use_amp):
+            logits = model(images)
+            loss = criterion(logits, labels) / accum_steps
 
-        epoch_loss += loss.item()
-        
+        if scaler is not None:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
+
+        if (step_idx + 1) % accum_steps == 0:
+            if scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+            optimizer.zero_grad()
+
+        epoch_loss += loss.item() * accum_steps
+
         preds = logits.argmax(dim=1).cpu().detach().numpy()
         all_preds.extend(preds)
         all_labels.extend(labels.cpu().numpy())
+
+    # Final flush if needed
+    if (step_idx + 1) % accum_steps != 0:
+        if scaler is not None:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
+        optimizer.zero_grad()
 
     avg_loss = epoch_loss / len(train_loader)
     train_f1_weighted = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
@@ -201,21 +224,21 @@ def train_epoch(model, train_loader, criterion, optimizer, device):
     return avg_loss, train_f1_weighted, train_acc
 
 
-def validate_epoch(model, val_loader, criterion, device):
+def validate_epoch(model, val_loader, criterion, device, config=None):
     """Validate for one epoch."""
     model.eval()
     val_loss = 0.0
     all_preds, all_labels = [], []
 
+    use_amp = getattr(config, 'USE_AMP', False) if config is not None else False
     with torch.no_grad():
         for images, labels in tqdm(val_loader, desc="Validating"):
             images = images.to(device)
             labels = labels.to(device)
-            
-            logits = model(images)
-            loss = criterion(logits, labels)
+            with autocast(enabled=use_amp):
+                logits = model(images)
+                loss = criterion(logits, labels)
             val_loss += loss.item()
-            
             preds = logits.argmax(dim=1).cpu().numpy()
             all_preds.extend(preds)
             all_labels.extend(labels.cpu().numpy())
@@ -238,7 +261,8 @@ def train_wagner_stage2(
     config,
     mode='two-stage',
     encoder_weights_path=None,
-    save_suffix=''
+    save_suffix='',
+    use_class_weights=None
 ):
     """
     Train Stage 2 Wagner classifier with optional progressive unfreezing.
@@ -248,6 +272,7 @@ def train_wagner_stage2(
         mode: 'scratch' | 'imagenet' | 'two-stage'
         encoder_weights_path: Path to Stage 1 encoder (if mode='two-stage')
         save_suffix: Suffix for checkpoint filenames (for ablations)
+        use_class_weights: Optional override for class weighting
     """
     
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
@@ -256,6 +281,9 @@ def train_wagner_stage2(
     print(f"\n{'='*70}")
     print(f"Stage 2: Wagner Grading ({mode.upper()})")
     print(f"{'='*70}")
+
+    if use_class_weights is None:
+        use_class_weights = getattr(config, 'USE_CLASS_WEIGHTS_STAGE2', True)
     
     # Build model
     model = SegFormerWagnerClassifier(num_classes=4)
@@ -277,6 +305,13 @@ def train_wagner_stage2(
         print("Training from scratch (no pretrained weights)")
     
     model = model.to(device)
+    # Enable gradient checkpointing on backbone if configured
+    if getattr(config, 'GRADIENT_CHECKPOINTING', False):
+        try:
+            model.backbone.gradient_checkpointing_enable()
+            print("Enabled gradient checkpointing on SegFormer backbone")
+        except Exception:
+            pass
     
     # Data
     train_dataset = DPMDataset(
@@ -308,7 +343,7 @@ def train_wagner_stage2(
     print(f"Class weights: {class_weights}")
     
     # Loss with class weighting
-    if config.USE_CLASS_WEIGHTS_STAGE2:
+    if use_class_weights:
         criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
     else:
         criterion = nn.CrossEntropyLoss()
@@ -344,6 +379,7 @@ def train_wagner_stage2(
         'val_f1_macro': [],
         'val_acc': [],
     }
+    best_metrics = {}
     
     for epoch in range(config.EPOCHS_STAGE2):
         # Progressive unfreezing
@@ -360,15 +396,24 @@ def train_wagner_stage2(
                 print(f"   → Unfroze encoder block {block_to_unfreeze}")
         
         # Training
+        # Attach config and scaler to model for train_epoch convenience
+        # (avoids changing many signatures)
+        model._training_config = config
+        model._amp_scaler = GradScaler() if getattr(config, 'USE_AMP', False) else None
+
         train_loss, train_f1, train_acc = train_epoch(
-            model, train_loader, criterion, optimizer, device
+            model, train_loader, criterion, optimizer, device, 
         )
         
         # Validation
         (val_loss, val_f1_weighted, val_f1_macro, val_acc,
-         all_preds, all_labels, precision, recall, f1) = validate_epoch(
-            model, val_loader, criterion, device
+         all_preds, all_labels, precision, recall, class_f1) = validate_epoch(
+            model, val_loader, criterion, device, config=config
         )
+
+        precision = np.atleast_1d(precision)
+        recall = np.atleast_1d(recall)
+        class_f1 = np.atleast_1d(class_f1)
         
         history['train_loss'].append(train_loss)
         history['train_f1_weighted'].append(train_f1)
@@ -381,7 +426,7 @@ def train_wagner_stage2(
         print(f"\nEpoch {epoch+1}/{config.EPOCHS_STAGE2}")
         print(f"  Train: Loss={train_loss:.4f}, F1_w={train_f1:.4f}, Acc={train_acc:.4f}")
         print(f"  Val:   Loss={val_loss:.4f}, F1_w={val_f1_weighted:.4f}, F1_m={val_f1_macro:.4f}, Acc={val_acc:.4f}")
-        print(f"  Per-class F1: {[f'{f:.3f}' for f in f1]}")
+        print(f"  Per-class F1: {[f'{score:.3f}' for score in class_f1]}")
         
         # Save best model (based on weighted F1)
         if val_f1_weighted > (best_f1_weighted + config.EARLY_STOPPING_MIN_DELTA):
@@ -399,7 +444,7 @@ def train_wagner_stage2(
                 'val_f1_weighted': float(val_f1_weighted),
                 'val_f1_macro': float(val_f1_macro),
                 'val_acc': float(val_acc),
-                'per_class_f1': [float(x) for x in f1],
+                'per_class_f1': [float(x) for x in class_f1],
                 'per_class_precision': [float(x) for x in precision],
                 'per_class_recall': [float(x) for x in recall],
                 'confusion_matrix': confusion_matrix(all_labels, all_preds).tolist()
@@ -418,8 +463,8 @@ def train_wagner_stage2(
         scheduler.step()
         
         # W&B logging
-        if wandb_run:
-            wandb.log({
+        if wandb_run is not None:
+            wandb_run.log({
                 'epoch': epoch + 1,
                 'lr': optimizer.param_groups[0]['lr'],
                 'train_loss': train_loss,
@@ -439,13 +484,13 @@ def train_wagner_stage2(
     print(f"   Metrics saved with checkpoint")
     print(f"{'='*70}\n")
     
-    if wandb_run:
-        wandb.finish()
+    if wandb_run is not None:
+        wandb_run.finish()
     
     return {
         'best_f1_weighted': best_f1_weighted,
         'best_f1_macro': best_f1_macro,
-        'best_metrics': best_metrics if 'best_metrics' in locals() else {},
+        'best_metrics': best_metrics,
         'history': history
     }
 
@@ -554,9 +599,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # Override config if needed
-    if args.no_class_weights:
-        Config.USE_CLASS_WEIGHTS_STAGE2 = False
-    
     if args.mode == 'ablation':
         run_ablation_study(Config)
     else:
@@ -564,5 +606,6 @@ if __name__ == "__main__":
         train_wagner_stage2(
             Config,
             mode=args.mode,
-            encoder_weights_path=encoder_path
+            encoder_weights_path=encoder_path,
+            use_class_weights=not args.no_class_weights
         )
