@@ -209,3 +209,100 @@ If any check prints `MISSING`, run this helper in Kaggle and set the matching pa
 !find /kaggle/input -maxdepth 6 -type d -name "Foot Ulcer Segmentation Challenge"
 !find /kaggle/input -maxdepth 6 -type f -name "config.py"
 ```
+
+-----here---------
+
+You do not need to paste the entire results notebook into the Kaggle training notebook.
+
+Use it like this:
+- Keep the Kaggle training notebook for training only.
+- After training finishes, either:
+  - open results_viewer.ipynb and run it separately, or
+  - copy only its cells that load `outputs/*.json` and `outputs/*.png` into the end of your Kaggle notebook.
+
+For XAI, add one extra cell after Stage 2 finishes and after the checkpoint is saved. The repo already has the XAI script in xai_analysis.py. You just need to call it.
+
+Use this order in Kaggle:
+1. Run Stage 1.
+2. Run Stage 2.
+3. Run XAI from the saved checkpoint.
+4. Run the results viewer cells to display metrics and graphs.
+
+A practical Kaggle flow is:
+
+```python
+# cell 1
+import sys
+sys.path.append('/kaggle/working/scripts')
+```
+
+```python
+# cell 2
+from config import Config
+from train_stage1_segmentation import train_segmentation
+train_segmentation(Config)
+```
+
+```python
+# cell 3
+from train_stage2_wagner import train_wagner_grading
+train_wagner_grading(Config)
+```
+
+```python
+# cell 4
+from xai_analysis import run_stage2_xai
+
+# If your checkpoint name is different, adjust model_path accordingly
+run_stage2_xai(
+    Config,
+    split='valid',
+    num_samples=5,
+    batch_size=2,
+    model_path='outputs/best_wagner_model_two_stage.pth',
+    display_inline=True
+)
+```
+
+```python
+# cell 5
+from pathlib import Path
+encoder_path = Path('outputs/encoder_pretrained.pth')
+print('Encoder checkpoint exists:', encoder_path.exists())
+print('Path:', encoder_path.resolve())
+```
+
+Then run the results viewer notebook or copy its display cells, which will read:
+- `outputs/stage1_history.json`
+- `outputs/stage2_best_metrics.json`
+- `outputs/ablation_results.json` if you run ablation
+- `outputs/stage1_training_curves.png`
+- `outputs/stage2_loss_curves.png`
+- `outputs/stage2_f1_curves.png`
+- `outputs/stage2_confusion_matrix.png`
+- `outputs/xai/*.png`
+
+If you want to run everything to get results for the paper, the simplest full sequence is:
+- Stage 1 training
+- Stage 2 training
+- XAI generation
+- Results viewer notebook for tables and figures
+
+If you want, I can give you the exact Kaggle cell-by-cell notebook content in a single copy-paste block.
+
+
+
+You have two workable choices:
+
+1. Run the results notebook locally after Kaggle finishes training.
+- Train in Kaggle and make sure it saves everything under `/kaggle/working/outputs`.
+- Download the whole `outputs/` folder from Kaggle.
+- Put that folder into your local repo as `outputs/`.
+- Open results_viewer.ipynb locally and run all cells.
+
+2. Run the results notebook inside Kaggle.
+- Upload results_viewer.ipynb to Kaggle, or copy its cells into your Kaggle notebook.
+- Change `OUTPUT_DIR = Path('outputs')` to `OUTPUT_DIR = Path('/kaggle/working/outputs')`.
+- Then run the notebook cells there.
+
+So the key point is: the notebook must run in the same environment where the output files exist. If training is in Kaggle, the easiest path is to save outputs there, download them, then run the results notebook locally.

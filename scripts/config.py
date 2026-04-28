@@ -14,10 +14,6 @@ class Config:
     SEGFORMER_NUM_CLASSES_STAGE2 = 4
     ENCODER_WEIGHTS = 'imagenet'  # Legacy reference
     
-    # Class weights for DPM Wagner grades (approximate from dataset)
-    # Adjust these based on actual class distribution in your DPM dataset
-    CLASS_WEIGHTS_STAGE2 = torch.tensor([1.0, 1.2, 1.5, 1.8])
-
     # Training
     # Default batch size (reduce if OOMs occur). Adjust with GRADIENT_ACCUMULATION_STEPS
     BATCH_SIZE = 2
