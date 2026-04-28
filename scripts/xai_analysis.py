@@ -31,7 +31,72 @@ def load_stage2_model(config, model_path=None):
     model.eval()
     return model
 
-def generate_xai_explanations(model, test_loader, config, num_samples=5, display_inline=True):
+
+def _safe_integrated_gradients(
+    ig,
+    img,
+    label,
+    device,
+    n_steps=50,
+    internal_batch_size=4,
+    allow_cpu_fallback=True,
+):
+    """Compute IG with CUDA OOM recovery by reducing work and optional CPU fallback."""
+    try:
+        return ig.attribute(
+            img,
+            target=label,
+            n_steps=n_steps,
+            internal_batch_size=internal_batch_size,
+        )
+    except torch.cuda.OutOfMemoryError:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        print(
+            f"⚠️ CUDA OOM during IG (n_steps={n_steps}, internal_batch_size={internal_batch_size}). "
+            "Retrying with lighter settings..."
+        )
+        reduced_steps = max(10, n_steps // 2)
+        try:
+            return ig.attribute(
+                img,
+                target=label,
+                n_steps=reduced_steps,
+                internal_batch_size=1,
+            )
+        except torch.cuda.OutOfMemoryError:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if not allow_cpu_fallback:
+                raise
+
+            print("⚠️ Still OOM on CUDA. Falling back to CPU for this sample attribution...")
+            model = ig.forward_func
+            original_device = next(model.parameters()).device
+            model_cpu = model.to('cpu')
+            model_cpu.eval()
+            ig_cpu = IntegratedGradients(model_cpu)
+            cpu_attr = ig_cpu.attribute(
+                img.detach().to('cpu'),
+                target=label,
+                n_steps=reduced_steps,
+                internal_batch_size=1,
+            )
+            model_cpu.to(original_device)
+            if str(device).startswith('cuda') and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            return cpu_attr.to(original_device)
+
+def generate_xai_explanations(
+    model,
+    test_loader,
+    config,
+    num_samples=5,
+    display_inline=True,
+    n_steps=24,
+    internal_batch_size=2,
+    allow_cpu_fallback=True,
+):
     """Generate Integrated Gradients explanations for model predictions"""
 
     model.eval()
@@ -58,8 +123,16 @@ def generate_xai_explanations(model, test_loader, config, num_samples=5, display
             img = images[i:i+1]  # Keep batch dimension
             label = int(labels[i].item())
 
-            # Generate attributions
-            attributions = ig.attribute(img, target=label, n_steps=50)
+            # Generate attributions with memory-safe fallback.
+            attributions = _safe_integrated_gradients(
+                ig,
+                img,
+                label,
+                config.DEVICE,
+                n_steps=n_steps,
+                internal_batch_size=internal_batch_size,
+                allow_cpu_fallback=allow_cpu_fallback,
+            )
 
             # Process for visualization
             original_img = img.squeeze(0).cpu().detach().numpy()
@@ -114,7 +187,17 @@ def generate_xai_explanations(model, test_loader, config, num_samples=5, display
     print(f"✅ Generated {samples_processed} XAI explanations in {xai_dir}")
 
 
-def run_stage2_xai(config, split='valid', num_samples=5, batch_size=4, model_path=None, display_inline=True):
+def run_stage2_xai(
+    config,
+    split='valid',
+    num_samples=5,
+    batch_size=1,
+    model_path=None,
+    display_inline=True,
+    n_steps=24,
+    internal_batch_size=2,
+    allow_cpu_fallback=True,
+):
     """One-call helper to load Stage 2 and save XAI outputs."""
     from torch.utils.data import DataLoader
     from dataset import DPMDataset, get_transforms
@@ -123,7 +206,16 @@ def run_stage2_xai(config, split='valid', num_samples=5, batch_size=4, model_pat
     dataset = DPMDataset(config.DPM_PATH, split=split, transform=get_transforms('val'))
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=getattr(config, 'NUM_WORKERS', 0))
 
-    generate_xai_explanations(model, loader, config, num_samples=num_samples, display_inline=display_inline)
+    generate_xai_explanations(
+        model,
+        loader,
+        config,
+        num_samples=num_samples,
+        display_inline=display_inline,
+        n_steps=n_steps,
+        internal_batch_size=internal_batch_size,
+        allow_cpu_fallback=allow_cpu_fallback,
+    )
 
 def get_predictions_and_attributions(model, test_loader, config):
     """Get model predictions and attributions for analysis"""
@@ -157,7 +249,7 @@ def get_predictions_and_attributions(model, test_loader, config):
         images = images.to(config.DEVICE).requires_grad_()
         labels = labels.to(config.DEVICE)
 
-        attributions = ig.attribute(images, target=labels, n_steps=50)
+        attributions = ig.attribute(images, target=labels, n_steps=24, internal_batch_size=1)
         attributions_list.append(attributions.cpu())
 
     if attributions_list:
