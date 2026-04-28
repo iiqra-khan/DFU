@@ -18,7 +18,7 @@ class Config:
     # Default batch size (reduce if OOMs occur). Adjust with GRADIENT_ACCUMULATION_STEPS
     BATCH_SIZE = 2
     EPOCHS_STAGE1 = 20
-    EPOCHS_STAGE2 = 20
+    EPOCHS_STAGE2 = 30
     LR_STAGE1 = 3e-4
     LR_STAGE2 = 1e-5
     WEIGHT_DECAY = 1e-4
