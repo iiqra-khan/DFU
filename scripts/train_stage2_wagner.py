@@ -401,10 +401,30 @@ def train_wagner_stage2(
         num_workers=config.NUM_WORKERS
     )
     
-    # Compute class weights from training data
-    class_weights, class_counts = compute_class_weights(train_dataset, num_classes=4)
-    print(f"\nClass distribution in training set: {class_counts}")
-    print(f"Class weights: {class_weights}")
+    # Compute class weights and distributions from training and validation data
+    class_weights, train_class_counts = compute_class_weights(train_dataset, num_classes=4)
+
+    # Validation distribution (for inspection only)
+    val_labels = np.array([val_dataset[i][1] for i in range(len(val_dataset))])
+    val_class_counts = np.bincount(val_labels, minlength=4)
+
+    print(f"\nClass distribution in training set: {train_class_counts}")
+    print(f"Class distribution in validation set: {val_class_counts}")
+    print(f"Class weights (used for loss): {class_weights}")
+
+    # Save class distributions so they are visible in Kaggle Outputs / job artifacts
+    try:
+        dist_path = os.path.join(config.OUTPUT_DIR, 'stage2_class_distribution.json')
+        with open(dist_path, 'w', encoding='utf-8') as f:
+            json.dump({
+                'train_counts': train_class_counts.tolist() if hasattr(train_class_counts, 'tolist') else train_class_counts,
+                'val_counts': val_class_counts.tolist() if hasattr(val_class_counts, 'tolist') else val_class_counts,
+                'train_total': int(len(train_dataset)),
+                'val_total': int(len(val_dataset))
+            }, f, indent=2)
+        print(f"Saved class distributions to {dist_path}")
+    except Exception as e:
+        print(f"⚠️ Could not save class distribution JSON: {e}")
     
     # Loss with class weighting
     if use_class_weights:

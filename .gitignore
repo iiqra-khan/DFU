@@ -1,8 +1,9 @@
 .venv/
-pycache/
+__pycache__/
 *.pyc
 .ipynb_checkpoints/
 outputs/
+notebooks/
 *.pth
 .DS_Store
 run_instr.md

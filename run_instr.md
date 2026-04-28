@@ -306,3 +306,11 @@ You have two workable choices:
 - Then run the notebook cells there.
 
 So the key point is: the notebook must run in the same environment where the output files exist. If training is in Kaggle, the easiest path is to save outputs there, download them, then run the results notebook locally.
+
+
+
+Yes — do EDA. It's relevant and usually worth the small upfront cost.
+
+Why: reveals class imbalance, label noise/mislabels, missing/corrupt files, split leakage, image-size/aspect issues, and informs augmentation/weighting choices.
+Quick checks to run once: overall class counts (already added to the Stage 2 run), per-split counts, a few example images per class, mask/foreground pixel distribution, image size histogram, duplicate filenames.
+Cost: negligible (single O(N) passes, simple image reads); far cheaper than wasted training time from unseen data issues.
