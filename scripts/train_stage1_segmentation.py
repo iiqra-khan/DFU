@@ -5,6 +5,8 @@ from transformers import SegformerForSemanticSegmentation
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
+import json
+import matplotlib.pyplot as plt
 import os
 import math
 
@@ -59,6 +61,46 @@ def _ensure_channel_dim(mask_tensor):
     if mask_tensor.dim() == 3:
         return mask_tensor.unsqueeze(1)
     return mask_tensor
+
+
+def _save_stage1_artifacts(config, history, best_val_dice):
+    if not getattr(config, 'SAVE_METRICS_JSON', True):
+        return
+
+    history_path = os.path.join(config.OUTPUT_DIR, 'stage1_history.json')
+    with open(history_path, 'w', encoding='utf-8') as f:
+        json.dump({
+            'best_val_dice': None if best_val_dice == -math.inf else float(best_val_dice),
+            'history': history,
+        }, f, indent=2)
+
+    if not getattr(config, 'SAVE_PLOTS', True):
+        return
+
+    fig, ax1 = plt.subplots(figsize=(10, 5))
+    ax1.plot(history['epoch'], history['train_loss'], label='Train Loss', color='tab:blue')
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('Train Loss', color='tab:blue')
+    ax1.tick_params(axis='y', labelcolor='tab:blue')
+
+    if history['val_epoch']:
+        ax2 = ax1.twinx()
+        ax2.plot(history['val_epoch'], history['val_dice'], label='Val Dice', color='tab:green', marker='o')
+        ax2.set_ylabel('Val Dice', color='tab:green')
+        ax2.tick_params(axis='y', labelcolor='tab:green')
+    else:
+        ax2 = None
+
+    lines, labels = ax1.get_legend_handles_labels()
+    if ax2 is not None:
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        lines += lines2
+        labels += labels2
+    ax1.legend(lines, labels, loc='best')
+    ax1.set_title('Stage 1 Training Curves')
+    fig.tight_layout()
+    fig.savefig(os.path.join(config.OUTPUT_DIR, 'stage1_training_curves.png'), dpi=150, bbox_inches='tight')
+    plt.close(fig)
 
 
 def train_segmentation(config):
@@ -130,6 +172,13 @@ def train_segmentation(config):
 
     best_val_dice = -math.inf
     epochs_without_improvement = 0
+    history = {
+        'epoch': [],
+        'train_loss': [],
+        'val_epoch': [],
+        'val_dice': [],
+        'lr': [],
+    }
 
     print(f"🚀 Starting Stage 1 SegFormer-B2 Training")
     print(f"   Model: {config.SEGFORMER_MODEL}")
@@ -179,57 +228,73 @@ def train_segmentation(config):
             optimizer.zero_grad()
 
         avg_train_loss = epoch_loss / len(train_loader)
+        history['epoch'].append(epoch + 1)
+        history['train_loss'].append(float(avg_train_loss))
+        history['lr'].append(float(scheduler.get_last_lr()[0]))
 
-        # Validation
-        model.eval()
-        val_dice = 0.0
-        with torch.no_grad():
-            for images, masks in tqdm(val_loader, desc=f"Epoch {epoch+1}/{config.EPOCHS_STAGE1} [Val]"):
-                images = images.to(config.DEVICE)
-                masks = _ensure_channel_dim(masks.to(config.DEVICE).float())
-                masks = (masks > 0.5).float()
+        should_validate = (
+            (epoch + 1) % getattr(config, 'VALIDATE_EVERY_N_EPOCHS', 1) == 0
+            or (epoch + 1) == config.EPOCHS_STAGE1
+        )
 
-                with autocast(enabled=getattr(config, 'USE_AMP', False)):
-                    outputs = model(images)
-                # Dice score for binary segmentation
-                probs = torch.sigmoid(outputs)
-                preds = (probs > 0.5).float()
-                intersection = (preds * masks).sum(dim=(1, 2, 3))
-                union = preds.sum(dim=(1, 2, 3)) + masks.sum(dim=(1, 2, 3))
-                dice = (2 * intersection) / (union + 1e-6)
-                val_dice += dice.mean().item()
+        avg_val_dice = None
+        if should_validate:
+            # Validation
+            model.eval()
+            val_dice = 0.0
+            with torch.no_grad():
+                for images, masks in tqdm(val_loader, desc=f"Epoch {epoch+1}/{config.EPOCHS_STAGE1} [Val]"):
+                    images = images.to(config.DEVICE)
+                    masks = _ensure_channel_dim(masks.to(config.DEVICE).float())
+                    masks = (masks > 0.5).float()
 
-        avg_val_dice = val_dice / len(val_loader)
+                    with autocast(enabled=getattr(config, 'USE_AMP', False)):
+                        outputs = model(images)
+                    # Dice score for binary segmentation
+                    probs = torch.sigmoid(outputs)
+                    preds = (probs > 0.5).float()
+                    intersection = (preds * masks).sum(dim=(1, 2, 3))
+                    union = preds.sum(dim=(1, 2, 3)) + masks.sum(dim=(1, 2, 3))
+                    dice = (2 * intersection) / (union + 1e-6)
+                    val_dice += dice.mean().item()
 
-        print(f"Epoch {epoch+1}/{config.EPOCHS_STAGE1}: "
-              f"Train Loss: {avg_train_loss:.4f}, Val Dice: {avg_val_dice:.4f}, "
-              f"LR: {scheduler.get_last_lr()[0]:.2e}")
+            avg_val_dice = val_dice / len(val_loader)
+            history['val_epoch'].append(epoch + 1)
+            history['val_dice'].append(float(avg_val_dice))
 
-        # Save best model and track improvement for early stopping
-        if avg_val_dice > (best_val_dice + config.EARLY_STOPPING_MIN_DELTA):
-            best_val_dice = avg_val_dice
-            epochs_without_improvement = 0
-            
-            # Save full checkpoint
-            torch.save(
-                model.state_dict(),
-                f"{config.OUTPUT_DIR}/stage1_segformer_best.pth"
-            )
-            
-            # Save encoder separately for Stage 2 transfer
-            torch.save(
-                model.model.segformer.encoder.state_dict(),
-                f"{config.OUTPUT_DIR}/encoder_pretrained.pth"
-            )
-            
-            print(f"  ✅ Saved best model (Dice: {best_val_dice:.4f})")
+            print(f"Epoch {epoch+1}/{config.EPOCHS_STAGE1}: "
+                  f"Train Loss: {avg_train_loss:.4f}, Val Dice: {avg_val_dice:.4f}, "
+                  f"LR: {scheduler.get_last_lr()[0]:.2e}")
+
+            # Save best model and track improvement for early stopping
+            if avg_val_dice > (best_val_dice + config.EARLY_STOPPING_MIN_DELTA):
+                best_val_dice = avg_val_dice
+                epochs_without_improvement = 0
+                
+                # Save full checkpoint
+                torch.save(
+                    model.state_dict(),
+                    f"{config.OUTPUT_DIR}/stage1_segformer_best.pth"
+                )
+                
+                # Save encoder separately for Stage 2 transfer
+                torch.save(
+                    model.model.segformer.encoder.state_dict(),
+                    f"{config.OUTPUT_DIR}/encoder_pretrained.pth"
+                )
+                
+                print(f"  ✅ Saved best model (Dice: {best_val_dice:.4f})")
+            else:
+                epochs_without_improvement += 1
         else:
-            epochs_without_improvement += 1
+            print(f"Epoch {epoch+1}/{config.EPOCHS_STAGE1}: "
+                  f"Train Loss: {avg_train_loss:.4f}, Val skipped, "
+                  f"LR: {scheduler.get_last_lr()[0]:.2e}")
 
         # Step scheduler
         scheduler.step()
 
-        if (config.USE_EARLY_STOPPING and
+        if (should_validate and config.USE_EARLY_STOPPING and
                 epochs_without_improvement >= config.EARLY_STOPPING_PATIENCE_STAGE1):
             print(
                 f"  ⏹️  Early stopping triggered "
@@ -238,7 +303,9 @@ def train_segmentation(config):
             )
             break
 
-    print(f"✅ Stage 1 complete. Best Val Dice: {best_val_dice:.4f}")
+    best_val_msg = f"{best_val_dice:.4f}" if best_val_dice != -math.inf else "not evaluated"
+    _save_stage1_artifacts(config, history, best_val_dice)
+    print(f"✅ Stage 1 complete. Best Val Dice: {best_val_msg}")
     print(f"   📦 Checkpoint: {config.OUTPUT_DIR}/stage1_segformer_best.pth")
     print(f"   🔌 Encoder: {config.OUTPUT_DIR}/encoder_pretrained.pth")
 

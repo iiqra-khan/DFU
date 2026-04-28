@@ -28,6 +28,7 @@ from tqdm import tqdm
 import math
 import json
 import numpy as np
+import matplotlib.pyplot as plt
 import importlib
 
 from dataset import DPMDataset, get_transforms
@@ -166,6 +167,69 @@ def compute_class_weights(dataset, num_classes=4):
     weights = torch.tensor(weights, dtype=torch.float32)
     
     return weights, class_counts
+
+
+def _save_stage2_artifacts(config, history, best_metrics, save_suffix=''):
+    if not getattr(config, 'SAVE_METRICS_JSON', True):
+        return
+
+    suffix = save_suffix or ''
+    history_path = os.path.join(config.OUTPUT_DIR, f'stage2_history{suffix}.json')
+    best_metrics_path = os.path.join(config.OUTPUT_DIR, f'stage2_best_metrics{suffix}.json')
+
+    with open(history_path, 'w', encoding='utf-8') as f:
+        json.dump(history, f, indent=2)
+
+    with open(best_metrics_path, 'w', encoding='utf-8') as f:
+        json.dump(best_metrics, f, indent=2)
+
+    if not getattr(config, 'SAVE_PLOTS', True):
+        return
+
+    # Training curves
+    fig, ax = plt.subplots(figsize=(11, 5))
+    ax.plot(history['epoch'], history['train_loss'], label='Train Loss', color='tab:blue')
+    if history['val_epoch']:
+        ax.plot(history['val_epoch'], history['val_loss'], label='Val Loss', color='tab:orange', marker='o')
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Loss')
+    ax.set_title('Stage 2 Training Loss')
+    ax.legend(loc='best')
+    fig.tight_layout()
+    fig.savefig(os.path.join(config.OUTPUT_DIR, f'stage2_loss_curves{suffix}.png'), dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+    ax.plot(history['epoch'], history['train_f1_weighted'], label='Train Weighted F1', color='tab:green')
+    if history['val_epoch']:
+        ax.plot(history['val_epoch'], history['val_f1_weighted'], label='Val Weighted F1', color='tab:red', marker='o')
+        ax.plot(history['val_epoch'], history['val_f1_macro'], label='Val Macro F1', color='tab:purple', marker='o')
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('F1')
+    ax.set_title('Stage 2 F1 Curves')
+    ax.legend(loc='best')
+    fig.tight_layout()
+    fig.savefig(os.path.join(config.OUTPUT_DIR, f'stage2_f1_curves{suffix}.png'), dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+    if best_metrics and best_metrics.get('confusion_matrix') is not None:
+        cm = np.array(best_metrics['confusion_matrix'])
+        fig, ax = plt.subplots(figsize=(6, 5))
+        im = ax.imshow(cm, cmap='Blues')
+        ax.set_title('Best Stage 2 Confusion Matrix')
+        ax.set_xlabel('Predicted')
+        ax.set_ylabel('True')
+        ax.set_xticks(range(cm.shape[1]))
+        ax.set_yticks(range(cm.shape[0]))
+        ax.set_xticklabels([str(i + 1) for i in range(cm.shape[1])])
+        ax.set_yticklabels([str(i + 1) for i in range(cm.shape[0])])
+        for i in range(cm.shape[0]):
+            for j in range(cm.shape[1]):
+                ax.text(j, i, int(cm[i, j]), ha='center', va='center', color='black')
+        fig.colorbar(im, ax=ax)
+        fig.tight_layout()
+        fig.savefig(os.path.join(config.OUTPUT_DIR, f'stage2_confusion_matrix{suffix}.png'), dpi=150, bbox_inches='tight')
+        plt.close(fig)
 
 
 def train_epoch(model, train_loader, criterion, optimizer, device):
@@ -371,9 +435,11 @@ def train_wagner_stage2(
     epochs_without_improvement = 0
     
     history = {
+        'epoch': [],
         'train_loss': [],
         'train_f1_weighted': [],
         'train_acc': [],
+        'val_epoch': [],
         'val_loss': [],
         'val_f1_weighted': [],
         'val_f1_macro': [],
@@ -405,59 +471,72 @@ def train_wagner_stage2(
             model, train_loader, criterion, optimizer, device, 
         )
         
-        # Validation
-        (val_loss, val_f1_weighted, val_f1_macro, val_acc,
-         all_preds, all_labels, precision, recall, class_f1) = validate_epoch(
-            model, val_loader, criterion, device, config=config
-        )
-
-        precision = np.atleast_1d(precision)
-        recall = np.atleast_1d(recall)
-        class_f1 = np.atleast_1d(class_f1)
-        
         history['train_loss'].append(train_loss)
         history['train_f1_weighted'].append(train_f1)
         history['train_acc'].append(train_acc)
-        history['val_loss'].append(val_loss)
-        history['val_f1_weighted'].append(val_f1_weighted)
-        history['val_f1_macro'].append(val_f1_macro)
-        history['val_acc'].append(val_acc)
-        
-        print(f"\nEpoch {epoch+1}/{config.EPOCHS_STAGE2}")
-        print(f"  Train: Loss={train_loss:.4f}, F1_w={train_f1:.4f}, Acc={train_acc:.4f}")
-        print(f"  Val:   Loss={val_loss:.4f}, F1_w={val_f1_weighted:.4f}, F1_m={val_f1_macro:.4f}, Acc={val_acc:.4f}")
-        print(f"  Per-class F1: {[f'{score:.3f}' for score in class_f1]}")
-        
-        # Save best model (based on weighted F1)
-        if val_f1_weighted > (best_f1_weighted + config.EARLY_STOPPING_MIN_DELTA):
-            best_f1_weighted = val_f1_weighted
-            best_f1_macro = val_f1_macro
-            epochs_without_improvement = 0
+        history['epoch'].append(epoch + 1)
+
+        should_validate = (
+            (epoch + 1) % getattr(config, 'VALIDATE_EVERY_N_EPOCHS', 1) == 0
+            or (epoch + 1) == config.EPOCHS_STAGE2
+        )
+
+        if should_validate:
+            # Validation
+            (val_loss, val_f1_weighted, val_f1_macro, val_acc,
+             all_preds, all_labels, precision, recall, class_f1) = validate_epoch(
+                model, val_loader, criterion, device, config=config
+            )
+
+            precision = np.atleast_1d(precision)
+            recall = np.atleast_1d(recall)
+            class_f1 = np.atleast_1d(class_f1)
             
-            checkpoint_name = f"best_wagner_model{save_suffix}.pth"
-            torch.save(model.state_dict(), f"{config.OUTPUT_DIR}/{checkpoint_name}")
-            print(f"  ✅ Saved best model: F1_w={best_f1_weighted:.4f}, F1_m={best_f1_macro:.4f}")
+            history['val_loss'].append(val_loss)
+            history['val_f1_weighted'].append(val_f1_weighted)
+            history['val_f1_macro'].append(val_f1_macro)
+            history['val_acc'].append(val_acc)
+            history['val_epoch'].append(epoch + 1)
             
-            # Save metrics
-            best_metrics = {
-                'epoch': epoch + 1,
-                'val_f1_weighted': float(val_f1_weighted),
-                'val_f1_macro': float(val_f1_macro),
-                'val_acc': float(val_acc),
-                'per_class_f1': [float(x) for x in class_f1],
-                'per_class_precision': [float(x) for x in precision],
-                'per_class_recall': [float(x) for x in recall],
-                'confusion_matrix': confusion_matrix(all_labels, all_preds).tolist()
-            }
+            print(f"\nEpoch {epoch+1}/{config.EPOCHS_STAGE2}")
+            print(f"  Train: Loss={train_loss:.4f}, F1_w={train_f1:.4f}, Acc={train_acc:.4f}")
+            print(f"  Val:   Loss={val_loss:.4f}, F1_w={val_f1_weighted:.4f}, F1_m={val_f1_macro:.4f}, Acc={val_acc:.4f}")
+            print(f"  Per-class F1: {[f'{score:.3f}' for score in class_f1]}")
+            
+            # Save best model (based on weighted F1)
+            if val_f1_weighted > (best_f1_weighted + config.EARLY_STOPPING_MIN_DELTA):
+                best_f1_weighted = val_f1_weighted
+                best_f1_macro = val_f1_macro
+                epochs_without_improvement = 0
+                
+                checkpoint_name = f"best_wagner_model{save_suffix}.pth"
+                torch.save(model.state_dict(), f"{config.OUTPUT_DIR}/{checkpoint_name}")
+                print(f"  ✅ Saved best model: F1_w={best_f1_weighted:.4f}, F1_m={best_f1_macro:.4f}")
+                
+                # Save metrics
+                best_metrics = {
+                    'epoch': epoch + 1,
+                    'val_f1_weighted': float(val_f1_weighted),
+                    'val_f1_macro': float(val_f1_macro),
+                    'val_acc': float(val_acc),
+                    'per_class_f1': [float(x) for x in class_f1],
+                    'per_class_precision': [float(x) for x in precision],
+                    'per_class_recall': [float(x) for x in recall],
+                    'confusion_matrix': confusion_matrix(all_labels, all_preds).tolist()
+                }
+            else:
+                epochs_without_improvement += 1
+            
+            # Early stopping
+            if (config.USE_EARLY_STOPPING and
+                epochs_without_improvement >= config.EARLY_STOPPING_PATIENCE_STAGE2):
+                print(f"\n⏹️ Early stopping at epoch {epoch+1} "
+                      f"(no F1 improvement for {config.EARLY_STOPPING_PATIENCE_STAGE2} epochs)")
+                break
         else:
-            epochs_without_improvement += 1
-        
-        # Early stopping
-        if (config.USE_EARLY_STOPPING and
-            epochs_without_improvement >= config.EARLY_STOPPING_PATIENCE_STAGE2):
-            print(f"\n⏹️ Early stopping at epoch {epoch+1} "
-                  f"(no F1 improvement for {config.EARLY_STOPPING_PATIENCE_STAGE2} epochs)")
-            break
+            print(f"\nEpoch {epoch+1}/{config.EPOCHS_STAGE2}")
+            print(f"  Train: Loss={train_loss:.4f}, F1_w={train_f1:.4f}, Acc={train_acc:.4f}")
+            print(f"  Val: skipped this epoch")
         
         # LR scheduler step
         scheduler.step()
@@ -470,10 +549,10 @@ def train_wagner_stage2(
                 'train_loss': train_loss,
                 'train_f1': train_f1,
                 'train_acc': train_acc,
-                'val_loss': val_loss,
-                'val_f1_weighted': val_f1_weighted,
-                'val_f1_macro': val_f1_macro,
-                'val_acc': val_acc,
+                'val_loss': locals().get('val_loss'),
+                'val_f1_weighted': locals().get('val_f1_weighted'),
+                'val_f1_macro': locals().get('val_f1_macro'),
+                'val_acc': locals().get('val_acc'),
             })
     
     # Final summary
@@ -483,6 +562,8 @@ def train_wagner_stage2(
     print(f"   Best Macro F1: {best_f1_macro:.4f}")
     print(f"   Metrics saved with checkpoint")
     print(f"{'='*70}\n")
+
+    _save_stage2_artifacts(config, history, best_metrics, save_suffix=save_suffix)
     
     if wandb_run is not None:
         wandb_run.finish()

@@ -80,3 +80,79 @@ Report:
 - Publishable experimental narrative with transparent limitations.
 
 If you want, I can also provide a second version of this file formatted as a strict conference experiment checklist (tasks, commands, expected outputs, and figure/table mapping).
+
+
+
+
+I’m checking the training and XAI code paths to enumerate exactly which metrics are computed, persisted, and still missing for a paper.
+
+Created 3 todos
+
+Read [](file:///d%3A/dfu_og/scripts/train_stage1_segmentation.py)
+
+Read [](file:///d%3A/dfu_og/scripts/train_stage2_wagner.py#1-1), lines 1 to 520
+
+Search complete: Inventory repo metrics
+
+Read [](file:///d%3A/dfu_og/scripts/xai_analysis.py)
+
+Searched codebase for "Stage 1 Stage 2 ablation outputs training metrics validation metrics per-class metrics confusion matrices learning curves XAI outputs", 11 results
+
+Searched for files matching `**/*metric*`, no matches
+
+Searched for files matching `**/*metric*.json`, no matches
+
+Searched for files matching `**/*confusion*`, no matches
+
+Searched for files matching `**/*ablation*`, 1 match
+
+Searched for files matching `**/*stage*`, 2 matches
+
+Searched for regex `metric|metrics|confusion|learning.*curve|ablation|Stage.*1|Stage.*2`, 200 results
+
+Searched for files matching `**/*.json`, no matches
+
+Searched for files matching `**/ablation_results.json`, no matches
+
+Searched for files matching `**/*confusion*.json`, no matches
+
+Searched for files matching `**/*learning*curve*`, no matches
+
+Searched for files matching `**/*xai*`, 1 match
+
+Searched for files matching `**/*metrics*`, no matches
+
+Searched for files matching `**/Stage 1/**`, no matches
+
+Searched for files matching `**/Stage 2/**`, no matches
+
+Searched for files matching `**/ablation/**`, no matches
+
+Read [](file:///d%3A/dfu_og/scripts/train_stage2_wagner.py#1-1), lines 1 to 260
+
+Read [](file:///d%3A/dfu_og/scripts/train_stage1_segmentation.py)
+
+Read [](file:///d%3A/dfu_og/scripts/xai_analysis.py)
+
+Read [](file:///d%3A/dfu_og/scripts/config.py)
+
+Read [](file:///d%3A/dfu_og/scripts/ablation_guide.md)
+
+Yes. The code already has a decent core set of metrics, but it is missing a few things you would normally want for a strong paper.
+
+What it already computes:
+- Stage 1 in train_stage1_segmentation.py: training loss, validation Dice, best checkpoint save, and encoder checkpoint save.
+- Stage 2 in train_stage2_wagner.py: training loss, training weighted F1, training accuracy, validation loss, validation weighted F1, validation macro F1, validation accuracy, per-class precision, recall, F1, and confusion matrix for the best epoch.
+- XAI in xai_analysis.py: Integrated Gradients explanations saved as PNGs in `outputs/xai/`.
+
+What it lacks:
+- No explicit test-set evaluation separate from validation.
+- No IoU/segmentation mIoU, pixel accuracy, or precision/recall for Stage 1.
+- No AUC/ROC, PR-AUC, sensitivity/specificity, or balanced accuracy for Stage 2.
+- No F1 confidence intervals, statistical significance testing, or multi-run mean ± std reporting.
+- No automatic saving of the full metric history to JSON/CSV, only the best epoch summary is kept in memory.
+- No automatic saving of learning curves or confusion-matrix plots to disk.
+- No external validation set / cross-dataset evaluation.
+- No calibration metrics like ECE or reliability plots.
+
+Bottom line: the code is enough to generate a basic results section, but for a paper it is still a bit thin unless you run extra evaluation and save the outputs cleanly. The biggest gap is that the code computes some useful metrics, but it does not persist a full experiment report automatically.

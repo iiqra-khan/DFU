@@ -59,7 +59,7 @@ class Config:
 
     # Hardware
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-    NUM_WORKERS = 4
+    NUM_WORKERS = 2
 
     # Memory / performance knobs
     # Enable gradient checkpointing on transformer backbone to trade compute for memory
@@ -70,6 +70,14 @@ class Config:
 
     # Gradient accumulation to achieve larger effective batch sizes with small per-step batches
     GRADIENT_ACCUMULATION_STEPS = 2
+
+    # Validate less often to reduce Kaggle runtime overhead.
+    # Validation still runs on the final epoch.
+    VALIDATE_EVERY_N_EPOCHS = 2
+
+    # Persist metrics/figures for notebook review and paper figures
+    SAVE_METRICS_JSON = True
+    SAVE_PLOTS = True
 
     # Output
     OUTPUT_DIR = './outputs'
