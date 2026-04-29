@@ -6,6 +6,17 @@ from albumentations.pytorch import ToTensorV2
 import glob
 from pathlib import Path
 import numpy as np
+import random
+import shutil
+
+
+IMAGE_EXTENSIONS = ('*.jpg', '*.jpeg', '*.png', '*.JPG', '*.JPEG', '*.PNG')
+DPM_GRADE_ALIASES = {
+    'grade1': ['grade1', 'grade_1', 'grade01'],
+    'grade2': ['grade2', 'grade_2', 'grade02'],
+    'grade3': ['grade3', 'grade_3', 'grade03'],
+    'grade4': ['grade4', 'grade_4', 'grade04'],
+}
 
 
 def _collect_files_with_extensions(directory, patterns):
@@ -17,6 +28,99 @@ def _collect_files_with_extensions(directory, patterns):
 
 def _stem(path):
     return Path(path).stem.lower()
+
+
+def _normalized_name(name):
+    return name.lower().replace(' ', '').replace('-', '').replace('__', '_')
+
+
+def _list_images(directory):
+    files = []
+    for pattern in IMAGE_EXTENSIONS:
+        files.extend(Path(directory).glob(pattern))
+    return sorted(files)
+
+
+def _split_dir_map(root, split):
+    split_root = _resolve_split_root(root, split)
+    if not split_root.exists():
+        return {}
+    return {
+        _normalized_name(p.name): p
+        for p in split_root.iterdir()
+        if p.is_dir()
+    }
+
+
+def _pick_grade_dir(mapping, grade):
+    for alias in DPM_GRADE_ALIASES[grade]:
+        found = mapping.get(_normalized_name(alias))
+        if found is not None:
+            return found
+    return None
+
+
+def _resolve_split_root(root, split):
+    root = Path(root)
+    split_aliases = {
+        'train': ['train'],
+        'valid': ['valid', 'val', 'test'],
+        'val': ['val', 'valid', 'test'],
+        'test': ['test', 'valid', 'val'],
+    }
+    for candidate in split_aliases.get(split, [split]):
+        split_root = root / candidate
+        if split_root.exists():
+            return split_root
+    return root / split
+
+
+def normalize_dpm_stratified(dpm_root, output_root='/kaggle/working/dpm_normalized', val_ratio=0.2, seed=42):
+    """Normalize DPM folders into train/valid/grade1..grade4 with a stratified split."""
+    src = Path(dpm_root)
+    out = Path(output_root)
+    if out.exists():
+        shutil.rmtree(out)
+
+    train_split = 'train' if (src / 'train').exists() else None
+    valid_split = next((s for s in ['valid', 'val', 'test'] if (src / s).exists()), None)
+    if not train_split or not valid_split:
+        raise FileNotFoundError(
+            f"Could not find train plus valid/val/test folders under DPM root: {src}"
+        )
+
+    train_map = _split_dir_map(src, train_split)
+    valid_map = _split_dir_map(src, valid_split)
+
+    random.seed(seed)
+    print("\nStratified split results:")
+
+    for grade in ['grade1', 'grade2', 'grade3', 'grade4']:
+        src_train = _pick_grade_dir(train_map, grade)
+        src_valid = _pick_grade_dir(valid_map, grade)
+        if not src_train or not src_valid:
+            raise FileNotFoundError(f"Missing folder for {grade} in train or {valid_split}")
+
+        all_images = _list_images(src_train) + _list_images(src_valid)
+        random.shuffle(all_images)
+        split_idx = int((1 - val_ratio) * len(all_images))
+        splits = {
+            'train': all_images[:split_idx],
+            'valid': all_images[split_idx:],
+        }
+
+        for split_name, files in splits.items():
+            dst = out / split_name / grade
+            dst.mkdir(parents=True, exist_ok=True)
+            for image_path in files:
+                dst_path = dst / image_path.name
+                if dst_path.exists():
+                    dst_path = dst / f"{image_path.stem}_{abs(hash(str(image_path))) % 100000}{image_path.suffix}"
+                shutil.copy2(image_path, dst_path)
+
+        print(f"  {grade}: train={split_idx}, val={len(all_images) - split_idx}")
+
+    return out
 
 class FUSegDataset(Dataset):
     """Binary segmentation dataset for FUSeg"""
@@ -74,16 +178,25 @@ class FUSegDataset(Dataset):
 class DPMDataset(Dataset):
     """Wagner grade classification dataset"""
     def __init__(self, data_dir, split='train', transform=None):
-        self.data_dir = Path(data_dir) / split
+        self.data_dir = _resolve_split_root(data_dir, split)
         self.transform = transform
         self.samples = []
+        grade_map = _split_dir_map(data_dir, split)
 
-        # Assumes structure: train/grade1/, train/grade2/, etc.
         for grade in ['grade1', 'grade2', 'grade3', 'grade4']:
-            grade_dir = self.data_dir / grade
-            images = list(grade_dir.glob('*.jpg'))
+            grade_dir = _pick_grade_dir(grade_map, grade)
+            if grade_dir is None:
+                continue
+            images = _list_images(grade_dir)
             label = int(grade[-1]) - 1  # 0-indexed
             self.samples.extend([(img, label) for img in images])
+
+        if len(self.samples) == 0:
+            raise ValueError(
+                "DPMDataset is empty. "
+                f"data_dir={data_dir}, split={split}. "
+                "Expected folders like train/grade1..grade4 or aliases grade_1/grade01."
+            )
 
     def __getitem__(self, idx):
         image_path, label = self.samples[idx]
