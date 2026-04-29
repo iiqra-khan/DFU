@@ -13,6 +13,20 @@ class Config:
     # Stage 2: SegFormer-B2 for 4-class Wagner classification
     SEGFORMER_NUM_CLASSES_STAGE2 = 4
     ENCODER_WEIGHTS = 'imagenet'  # Legacy reference
+
+    # Single-task SegFormer-B2 baseline for paper comparison
+    BASELINE_BACKBONE = 'nvidia/mit-b2'
+    BASELINE_NUM_CLASSES = 4
+    BASELINE_IMG_SIZE = 224
+    BASELINE_BATCH_SIZE = 16
+    BASELINE_EPOCHS = 30
+    BASELINE_LR = 1e-4
+    BASELINE_NUM_RUNS = 3
+    BASELINE_VAL_RATIO = 0.2
+    BASELINE_SEED = 42
+    BASELINE_OUTPUT_DIR = './outputs/baseline_segformer_b2'
+    BASELINE_NORMALIZE_DPM = True
+    BASELINE_NORMALIZED_DPM_PATH = '/kaggle/working/dpm_normalized'
     
     # Training
     # Default batch size (reduce if OOMs occur). Adjust with GRADIENT_ACCUMULATION_STEPS
