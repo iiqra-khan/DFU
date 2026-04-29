@@ -30,6 +30,8 @@ import json
 import numpy as np
 import matplotlib.pyplot as plt
 import importlib
+import random
+from pathlib import Path
 
 from dataset import DPMDataset, get_transforms
 from config import Config
@@ -169,6 +171,19 @@ def compute_class_weights(dataset, num_classes=4):
     return weights, class_counts
 
 
+def seed_everything(seed):
+    """Seed the main RNGs for repeatable independent runs."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def _has_split(dpm_root, split):
+    split_root = Path(dpm_root) / split
+    return split_root.exists() and any(p.is_dir() for p in split_root.iterdir())
+
+
 def _save_stage2_artifacts(config, history, best_metrics, save_suffix=''):
     if not getattr(config, 'SAVE_METRICS_JSON', True):
         return
@@ -230,6 +245,75 @@ def _save_stage2_artifacts(config, history, best_metrics, save_suffix=''):
         fig.tight_layout()
         fig.savefig(os.path.join(config.OUTPUT_DIR, f'stage2_confusion_matrix{suffix}.png'), dpi=150, bbox_inches='tight')
         plt.close(fig)
+
+
+def _save_confusion_matrix_plot(config, conf_mat, title, filename):
+    if not getattr(config, 'SAVE_PLOTS', True) or conf_mat is None:
+        return
+
+    cm = np.array(conf_mat)
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(cm, cmap='Blues')
+    ax.set_title(title)
+    ax.set_xlabel('Predicted')
+    ax.set_ylabel('True')
+    ax.set_xticks(range(cm.shape[1]))
+    ax.set_yticks(range(cm.shape[0]))
+    ax.set_xticklabels([str(i + 1) for i in range(cm.shape[1])])
+    ax.set_yticklabels([str(i + 1) for i in range(cm.shape[0])])
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            ax.text(j, i, int(cm[i, j]), ha='center', va='center', color='black')
+    fig.colorbar(im, ax=ax)
+    fig.tight_layout()
+    fig.savefig(os.path.join(config.OUTPUT_DIR, filename), dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+
+def _save_multi_run_summary_plot(config, summary, mode):
+    if not getattr(config, 'SAVE_PLOTS', True):
+        return
+
+    labels = []
+    means = []
+    stds = []
+
+    metric_specs = [
+        ('Val F1w', 'val_f1_weighted_mean', 'val_f1_weighted_std'),
+        ('Val F1m', 'val_f1_macro_mean', 'val_f1_macro_std'),
+        ('Val Acc', 'val_accuracy_mean', 'val_accuracy_std'),
+        ('Test F1w', 'test_f1_weighted_mean', 'test_f1_weighted_std'),
+        ('Test F1m', 'test_f1_macro_mean', 'test_f1_macro_std'),
+        ('Test Acc', 'test_accuracy_mean', 'test_accuracy_std'),
+    ]
+
+    for label, mean_key, std_key in metric_specs:
+        if summary.get(mean_key) is not None:
+            labels.append(label)
+            means.append(summary[mean_key])
+            stds.append(summary.get(std_key, 0.0) or 0.0)
+
+    if not labels:
+        return
+
+    colors = ['tab:blue' if label.startswith('Val') else 'tab:green' for label in labels]
+    fig, ax = plt.subplots(figsize=(9, 5))
+    x = np.arange(len(labels))
+    ax.bar(x, means, yerr=stds, capsize=5, color=colors, alpha=0.85)
+    ax.set_ylim(0, 1.0)
+    ax.set_ylabel('Score')
+    ax.set_title(f'Stage 2 Multi-Run Summary ({mode})')
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.grid(axis='y', linestyle='--', alpha=0.35)
+
+    for idx, value in enumerate(means):
+        ax.text(idx, min(value + 0.03, 0.98), f'{value:.3f}', ha='center', va='bottom', fontsize=9)
+
+    fig.tight_layout()
+    output_name = f'stage2_{mode.replace("-", "_")}_multi_run_summary.png'
+    fig.savefig(os.path.join(config.OUTPUT_DIR, output_name), dpi=150, bbox_inches='tight')
+    plt.close(fig)
 
 
 def train_epoch(model, train_loader, criterion, optimizer, device):
@@ -326,7 +410,9 @@ def train_wagner_stage2(
     mode='two-stage',
     encoder_weights_path=None,
     save_suffix='',
-    use_class_weights=None
+    use_class_weights=None,
+    seed=None,
+    evaluate_test=True
 ):
     """
     Train Stage 2 Wagner classifier with optional progressive unfreezing.
@@ -341,6 +427,9 @@ def train_wagner_stage2(
     
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
     device = config.DEVICE
+
+    if seed is not None:
+        seed_everything(seed)
     
     print(f"\n{'='*70}")
     print(f"Stage 2: Wagner Grading ({mode.upper()})")
@@ -388,6 +477,13 @@ def train_wagner_stage2(
         split='valid',
         transform=get_transforms('val')
     )
+    test_dataset = None
+    if evaluate_test and _has_split(config.DPM_PATH, 'test'):
+        test_dataset = DPMDataset(
+            config.DPM_PATH,
+            split='test',
+            transform=get_transforms('val')
+        )
     
     train_loader = DataLoader(
         train_dataset, 
@@ -400,6 +496,15 @@ def train_wagner_stage2(
         batch_size=config.BATCH_SIZE,
         num_workers=config.NUM_WORKERS
     )
+    test_loader = (
+        DataLoader(
+            test_dataset,
+            batch_size=config.BATCH_SIZE,
+            num_workers=config.NUM_WORKERS
+        )
+        if test_dataset is not None
+        else None
+    )
     
     # Compute class weights and distributions from training and validation data
     class_weights, train_class_counts = compute_class_weights(train_dataset, num_classes=4)
@@ -410,6 +515,10 @@ def train_wagner_stage2(
 
     print(f"\nClass distribution in training set: {train_class_counts}")
     print(f"Class distribution in validation set: {val_class_counts}")
+    if test_dataset is not None:
+        test_labels = np.array([test_dataset[i][1] for i in range(len(test_dataset))])
+        test_class_counts = np.bincount(test_labels, minlength=4)
+        print(f"Class distribution in test set: {test_class_counts}")
     print(f"Class weights (used for loss): {class_weights}")
 
     # Save class distributions so they are visible in Kaggle Outputs / job artifacts
@@ -419,8 +528,10 @@ def train_wagner_stage2(
             json.dump({
                 'train_counts': train_class_counts.tolist() if hasattr(train_class_counts, 'tolist') else train_class_counts,
                 'val_counts': val_class_counts.tolist() if hasattr(val_class_counts, 'tolist') else val_class_counts,
+                'test_counts': test_class_counts.tolist() if test_dataset is not None else None,
                 'train_total': int(len(train_dataset)),
-                'val_total': int(len(val_dataset))
+                'val_total': int(len(val_dataset)),
+                'test_total': int(len(test_dataset)) if test_dataset is not None else 0
             }, f, indent=2)
         print(f"Saved class distributions to {dist_path}")
     except Exception as e:
@@ -584,6 +695,42 @@ def train_wagner_stage2(
     print(f"{'='*70}\n")
 
     _save_stage2_artifacts(config, history, best_metrics, save_suffix=save_suffix)
+
+    if test_loader is not None and best_metrics:
+        checkpoint_name = f"best_wagner_model{save_suffix}.pth"
+        checkpoint_path = os.path.join(config.OUTPUT_DIR, checkpoint_name)
+        if os.path.exists(checkpoint_path):
+            model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+
+        (test_loss, test_f1_weighted, test_f1_macro, test_acc,
+         test_preds, test_labels, test_precision, test_recall, test_class_f1) = validate_epoch(
+            model, test_loader, criterion, device, config=config
+        )
+        test_metrics = {
+            'test_loss': float(test_loss),
+            'test_f1_weighted': float(test_f1_weighted),
+            'test_f1_macro': float(test_f1_macro),
+            'test_acc': float(test_acc),
+            'test_per_class_f1': [float(x) for x in np.atleast_1d(test_class_f1)],
+            'test_per_class_precision': [float(x) for x in np.atleast_1d(test_precision)],
+            'test_per_class_recall': [float(x) for x in np.atleast_1d(test_recall)],
+            'test_confusion_matrix': confusion_matrix(test_labels, test_preds).tolist()
+        }
+        best_metrics['test_metrics'] = test_metrics
+        test_metrics_path = os.path.join(config.OUTPUT_DIR, f'stage2_test_metrics{save_suffix}.json')
+        with open(test_metrics_path, 'w', encoding='utf-8') as f:
+            json.dump(test_metrics, f, indent=2)
+        _save_confusion_matrix_plot(
+            config,
+            test_metrics['test_confusion_matrix'],
+            'Held-Out Test Confusion Matrix',
+            f'stage2_test_confusion_matrix{save_suffix}.png'
+        )
+        print(
+            f"Test: Loss={test_loss:.4f}, F1_w={test_f1_weighted:.4f}, "
+            f"F1_m={test_f1_macro:.4f}, Acc={test_acc:.4f}"
+        )
+        print(f"Saved test metrics to {test_metrics_path}")
     
     if wandb_run is not None:
         wandb_run.finish()
@@ -594,6 +741,88 @@ def train_wagner_stage2(
         'best_metrics': best_metrics,
         'history': history
     }
+
+
+def run_multiple_stage2(config, mode='two-stage', runs=3, encoder_weights_path=None, use_class_weights=None):
+    """Run Stage 2 multiple times and summarize validation/test mean +/- std."""
+    os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+    all_results = []
+    base_seed = getattr(config, 'BASELINE_SEED', 42)
+
+    for run_id in range(runs):
+        suffix = f"_{mode.replace('-', '_')}_run{run_id}"
+        result = train_wagner_stage2(
+            config,
+            mode=mode,
+            encoder_weights_path=encoder_weights_path,
+            save_suffix=suffix,
+            use_class_weights=use_class_weights,
+            seed=base_seed + run_id,
+            evaluate_test=True,
+        )
+        result['run'] = run_id
+        result['seed'] = base_seed + run_id
+        all_results.append(result)
+
+    val_f1_weighted = [r['best_metrics']['val_f1_weighted'] for r in all_results if r.get('best_metrics')]
+    val_f1_macro = [r['best_metrics']['val_f1_macro'] for r in all_results if r.get('best_metrics')]
+    val_acc = [r['best_metrics']['val_acc'] for r in all_results if r.get('best_metrics')]
+
+    summary = {
+        'model': f'Stage 2 SegFormer-B2 ({mode})',
+        'dataset': 'DPM Wagner grade classification',
+        'num_runs': int(runs),
+        'runs': [
+            {
+                'run': int(r['run']),
+                'seed': int(r['seed']),
+                'best_metrics': r.get('best_metrics', {}),
+            }
+            for r in all_results
+        ],
+        'val_f1_weighted_mean': float(np.mean(val_f1_weighted)) if val_f1_weighted else None,
+        'val_f1_weighted_std': float(np.std(val_f1_weighted)) if val_f1_weighted else None,
+        'val_f1_macro_mean': float(np.mean(val_f1_macro)) if val_f1_macro else None,
+        'val_f1_macro_std': float(np.std(val_f1_macro)) if val_f1_macro else None,
+        'val_accuracy_mean': float(np.mean(val_acc)) if val_acc else None,
+        'val_accuracy_std': float(np.std(val_acc)) if val_acc else None,
+    }
+
+    test_metrics = [
+        r['best_metrics']['test_metrics']
+        for r in all_results
+        if r.get('best_metrics', {}).get('test_metrics')
+    ]
+    if test_metrics:
+        test_f1_weighted = [r['test_f1_weighted'] for r in test_metrics]
+        test_f1_macro = [r['test_f1_macro'] for r in test_metrics]
+        test_acc = [r['test_acc'] for r in test_metrics]
+        summary.update({
+            'test_f1_weighted_mean': float(np.mean(test_f1_weighted)),
+            'test_f1_weighted_std': float(np.std(test_f1_weighted)),
+            'test_f1_macro_mean': float(np.mean(test_f1_macro)),
+            'test_f1_macro_std': float(np.std(test_f1_macro)),
+            'test_accuracy_mean': float(np.mean(test_acc)),
+            'test_accuracy_std': float(np.std(test_acc)),
+        })
+
+    summary_path = os.path.join(config.OUTPUT_DIR, f'stage2_{mode.replace("-", "_")}_multi_run_summary.json')
+    with open(summary_path, 'w', encoding='utf-8') as f:
+        json.dump(summary, f, indent=2)
+    _save_multi_run_summary_plot(config, summary, mode)
+
+    print("\n========== STAGE 2 MULTI-RUN SUMMARY ==========")
+    print(f"Val Weighted F1 : {summary['val_f1_weighted_mean']:.4f} +/- {summary['val_f1_weighted_std']:.4f}")
+    print(f"Val Macro F1    : {summary['val_f1_macro_mean']:.4f} +/- {summary['val_f1_macro_std']:.4f}")
+    print(f"Val Accuracy    : {summary['val_accuracy_mean']:.4f} +/- {summary['val_accuracy_std']:.4f}")
+    if test_metrics:
+        print("\n========== HELD-OUT TEST SUMMARY ==========")
+        print(f"Test Weighted F1 : {summary['test_f1_weighted_mean']:.4f} +/- {summary['test_f1_weighted_std']:.4f}")
+        print(f"Test Macro F1    : {summary['test_f1_macro_mean']:.4f} +/- {summary['test_f1_macro_std']:.4f}")
+        print(f"Test Accuracy    : {summary['test_accuracy_mean']:.4f} +/- {summary['test_accuracy_std']:.4f}")
+    print(f"Saved multi-run summary to {summary_path}")
+
+    return summary
 
 
 def run_ablation_study(config):
@@ -696,17 +925,40 @@ if __name__ == "__main__":
         action='store_true',
         help='Disable class weighting'
     )
+    parser.add_argument(
+        '--runs',
+        type=int,
+        default=1,
+        help='Number of independent runs. Use 3 for paper mean +/- std.'
+    )
+    parser.add_argument(
+        '--seed',
+        type=int,
+        default=None,
+        help='Optional seed for a single run.'
+    )
     
     args = parser.parse_args()
     
     # Override config if needed
     if args.mode == 'ablation':
         run_ablation_study(Config)
+    elif args.runs > 1:
+        encoder_path = f"{Config.OUTPUT_DIR}/encoder_pretrained.pth"
+        run_multiple_stage2(
+            Config,
+            mode=args.mode,
+            runs=args.runs,
+            encoder_weights_path=encoder_path,
+            use_class_weights=not args.no_class_weights,
+        )
     else:
         encoder_path = f"{Config.OUTPUT_DIR}/encoder_pretrained.pth"
         train_wagner_stage2(
             Config,
             mode=args.mode,
             encoder_weights_path=encoder_path,
-            use_class_weights=not args.no_class_weights
+            use_class_weights=not args.no_class_weights,
+            seed=args.seed,
+            evaluate_test=True,
         )

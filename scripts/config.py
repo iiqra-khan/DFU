@@ -22,11 +22,8 @@ class Config:
     BASELINE_EPOCHS = 30
     BASELINE_LR = 1e-4
     BASELINE_NUM_RUNS = 3
-    BASELINE_VAL_RATIO = 0.2
     BASELINE_SEED = 42
     BASELINE_OUTPUT_DIR = './outputs/baseline_segformer_b2'
-    BASELINE_NORMALIZE_DPM = True
-    BASELINE_NORMALIZED_DPM_PATH = '/kaggle/working/dpm_normalized'
     
     # Training
     # Default batch size (reduce if OOMs occur). Adjust with GRADIENT_ACCUMULATION_STEPS

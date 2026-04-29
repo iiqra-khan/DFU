@@ -54,7 +54,7 @@ def test_config():
     print("\n📋 Configuration:")
     print(f"  FUSEG_PATH: {Config.FUSEG_PATH}")
     print(f"  DPM_PATH: {Config.DPM_PATH}")
-    print(f"  BACKBONE: {Config.BACKBONE}")
+    print(f"  SEGFORMER_MODEL: {Config.SEGFORMER_MODEL}")
     print(f"  BATCH_SIZE: {Config.BATCH_SIZE}")
     print(f"  EPOCHS_STAGE1: {Config.EPOCHS_STAGE1}")
     print(f"  EPOCHS_STAGE2: {Config.EPOCHS_STAGE2}")

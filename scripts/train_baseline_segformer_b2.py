@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from config import Config
-from dataset import DPMDataset, normalize_dpm_stratified
+from dataset import DPMDataset
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
@@ -320,21 +320,6 @@ def run_multiple(config, dpm_root):
     return summary
 
 
-def prepare_dpm_root(config, normalize=True):
-    if not normalize:
-        return config.DPM_PATH
-
-    normalized_root = normalize_dpm_stratified(
-        config.DPM_PATH,
-        output_root=config.BASELINE_NORMALIZED_DPM_PATH,
-        val_ratio=config.BASELINE_VAL_RATIO,
-        seed=config.BASELINE_SEED,
-    )
-    config.DPM_PATH = str(normalized_root)
-    print(f"DPM root: {config.DPM_PATH}")
-    return config.DPM_PATH
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description="Train single-task SegFormer-B2 DPM baseline")
     parser.add_argument('--dpm-path', default=None, help='Override Config.DPM_PATH')
@@ -343,7 +328,6 @@ def parse_args():
     parser.add_argument('--runs', type=int, default=None, help='Override Config.BASELINE_NUM_RUNS')
     parser.add_argument('--batch-size', type=int, default=None, help='Override Config.BASELINE_BATCH_SIZE')
     parser.add_argument('--img-size', type=int, default=None, help='Override Config.BASELINE_IMG_SIZE')
-    parser.add_argument('--no-normalize-dpm', action='store_true', help='Use DPM path exactly as provided')
     return parser.parse_args()
 
 
@@ -362,8 +346,4 @@ if __name__ == '__main__':
     if args.img_size is not None:
         Config.BASELINE_IMG_SIZE = args.img_size
 
-    dpm_root = prepare_dpm_root(
-        Config,
-        normalize=getattr(Config, 'BASELINE_NORMALIZE_DPM', True) and not args.no_normalize_dpm,
-    )
-    run_multiple(Config, dpm_root)
+    run_multiple(Config, Config.DPM_PATH)
