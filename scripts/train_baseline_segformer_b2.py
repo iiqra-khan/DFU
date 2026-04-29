@@ -142,6 +142,21 @@ def evaluate(model, loader, criterion, device, use_amp):
     return avg_loss, f1_weighted, f1_macro, accuracy, per_class_f1, conf_mat
 
 
+def _has_split(dpm_root, split):
+    split_root = Path(dpm_root) / split
+    return split_root.exists() and any(p.is_dir() for p in split_root.iterdir())
+
+
+def _build_loader(dataset, config, device, shuffle=False):
+    return DataLoader(
+        dataset,
+        batch_size=config.BASELINE_BATCH_SIZE,
+        shuffle=shuffle,
+        num_workers=config.NUM_WORKERS,
+        pin_memory=device == 'cuda',
+    )
+
+
 def run_single(config, dpm_root, run_id):
     seed_everything(config.BASELINE_SEED + run_id)
 
@@ -156,20 +171,20 @@ def run_single(config, dpm_root, run_id):
         split='valid',
         transform=get_baseline_transforms(config.BASELINE_IMG_SIZE, train=False),
     )
+    test_dataset = None
+    if _has_split(dpm_root, 'test'):
+        test_dataset = DPMDataset(
+            dpm_root,
+            split='test',
+            transform=get_baseline_transforms(config.BASELINE_IMG_SIZE, train=False),
+        )
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config.BASELINE_BATCH_SIZE,
-        shuffle=True,
-        num_workers=config.NUM_WORKERS,
-        pin_memory=device == 'cuda',
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config.BASELINE_BATCH_SIZE,
-        shuffle=False,
-        num_workers=config.NUM_WORKERS,
-        pin_memory=device == 'cuda',
+    train_loader = _build_loader(train_dataset, config, device, shuffle=True)
+    val_loader = _build_loader(val_dataset, config, device, shuffle=False)
+    test_loader = (
+        _build_loader(test_dataset, config, device, shuffle=False)
+        if test_dataset is not None
+        else None
     )
 
     model = SegFormerB2BaselineClassifier(
@@ -197,6 +212,7 @@ def run_single(config, dpm_root, run_id):
 
     best_f1_macro = -math.inf
     best_metrics = {}
+    best_checkpoint_path = Path(config.BASELINE_OUTPUT_DIR) / f"best_baseline_run{run_id}.pth"
 
     for epoch in range(1, config.BASELINE_EPOCHS + 1):
         train_loss, train_f1 = train_one_epoch(
@@ -225,8 +241,26 @@ def run_single(config, dpm_root, run_id):
                 'per_class_f1': [float(x) for x in per_class_f1],
                 'confusion_matrix': conf_mat,
             }
-            checkpoint_path = Path(config.BASELINE_OUTPUT_DIR) / f"best_baseline_run{run_id}.pth"
-            torch.save(model.state_dict(), checkpoint_path)
+            torch.save(model.state_dict(), best_checkpoint_path)
+
+    if test_loader is not None and best_checkpoint_path.exists():
+        model.load_state_dict(torch.load(best_checkpoint_path, map_location=device))
+        test_loss, test_f1_weighted, test_f1_macro, test_acc, test_per_class_f1, test_conf_mat = evaluate(
+            model, test_loader, criterion, device, use_amp
+        )
+        best_metrics['test_metrics'] = {
+            'test_loss': float(test_loss),
+            'test_f1_weighted': float(test_f1_weighted),
+            'test_f1_macro': float(test_f1_macro),
+            'test_acc': float(test_acc),
+            'test_per_class_f1': [float(x) for x in test_per_class_f1],
+            'test_confusion_matrix': test_conf_mat,
+        }
+        print(
+            f"[Baseline Run {run_id}] Test | "
+            f"Loss={test_loss:.4f} F1w={test_f1_weighted:.4f} "
+            f"F1m={test_f1_macro:.4f} Acc={test_acc:.4f}"
+        )
 
     return best_metrics
 
@@ -254,10 +288,29 @@ def run_multiple(config, dpm_root):
         'accuracy_std': float(np.std(accuracy)),
     }
 
+    test_results = [r.get('test_metrics') for r in all_results if r.get('test_metrics')]
+    if test_results:
+        test_f1_weighted = [r['test_f1_weighted'] for r in test_results]
+        test_f1_macro = [r['test_f1_macro'] for r in test_results]
+        test_accuracy = [r['test_acc'] for r in test_results]
+        summary.update({
+            'test_f1_weighted_mean': float(np.mean(test_f1_weighted)),
+            'test_f1_weighted_std': float(np.std(test_f1_weighted)),
+            'test_f1_macro_mean': float(np.mean(test_f1_macro)),
+            'test_f1_macro_std': float(np.std(test_f1_macro)),
+            'test_accuracy_mean': float(np.mean(test_accuracy)),
+            'test_accuracy_std': float(np.std(test_accuracy)),
+        })
+
     print("\n========== BASELINE SUMMARY ==========")
     print(f"Weighted F1 : {summary['f1_weighted_mean']:.4f} +/- {summary['f1_weighted_std']:.4f}")
     print(f"Macro F1    : {summary['f1_macro_mean']:.4f} +/- {summary['f1_macro_std']:.4f}")
     print(f"Accuracy    : {summary['accuracy_mean']:.4f} +/- {summary['accuracy_std']:.4f}")
+    if test_results:
+        print("\n========== TEST SUMMARY ==========")
+        print(f"Weighted F1 : {summary['test_f1_weighted_mean']:.4f} +/- {summary['test_f1_weighted_std']:.4f}")
+        print(f"Macro F1    : {summary['test_f1_macro_mean']:.4f} +/- {summary['test_f1_macro_std']:.4f}")
+        print(f"Accuracy    : {summary['test_accuracy_mean']:.4f} +/- {summary['test_accuracy_std']:.4f}")
 
     summary_path = Path(config.BASELINE_OUTPUT_DIR) / 'baseline_summary.json'
     with open(summary_path, 'w', encoding='utf-8') as f:

@@ -64,9 +64,9 @@ def _resolve_split_root(root, split):
     root = Path(root)
     split_aliases = {
         'train': ['train'],
-        'valid': ['valid', 'val', 'test'],
-        'val': ['val', 'valid', 'test'],
-        'test': ['test', 'valid', 'val'],
+        'valid': ['valid', 'val'],
+        'val': ['val', 'valid'],
+        'test': ['test'],
     }
     for candidate in split_aliases.get(split, [split]):
         split_root = root / candidate
@@ -76,21 +76,23 @@ def _resolve_split_root(root, split):
 
 
 def normalize_dpm_stratified(dpm_root, output_root='/kaggle/working/dpm_normalized', val_ratio=0.2, seed=42):
-    """Normalize DPM folders into train/valid/grade1..grade4 with a stratified split."""
+    """Normalize DPM into train/valid and pass test through untouched when present."""
     src = Path(dpm_root)
     out = Path(output_root)
     if out.exists():
         shutil.rmtree(out)
 
     train_split = 'train' if (src / 'train').exists() else None
-    valid_split = next((s for s in ['valid', 'val', 'test'] if (src / s).exists()), None)
+    valid_split = next((s for s in ['valid', 'val'] if (src / s).exists()), None)
+    test_split = 'test' if (src / 'test').exists() else None
     if not train_split or not valid_split:
         raise FileNotFoundError(
-            f"Could not find train plus valid/val/test folders under DPM root: {src}"
+            f"Could not find train plus valid/val folders under DPM root: {src}"
         )
 
     train_map = _split_dir_map(src, train_split)
     valid_map = _split_dir_map(src, valid_split)
+    test_map = _split_dir_map(src, test_split) if test_split else {}
 
     random.seed(seed)
     print("\nStratified split results:")
@@ -119,6 +121,25 @@ def normalize_dpm_stratified(dpm_root, output_root='/kaggle/working/dpm_normaliz
                 shutil.copy2(image_path, dst_path)
 
         print(f"  {grade}: train={split_idx}, val={len(all_images) - split_idx}")
+
+    if test_map:
+        print("\nTest set (untouched):")
+        for grade in ['grade1', 'grade2', 'grade3', 'grade4']:
+            src_test = _pick_grade_dir(test_map, grade)
+            if src_test is None:
+                continue
+
+            test_images = _list_images(src_test)
+            dst = out / 'test' / grade
+            dst.mkdir(parents=True, exist_ok=True)
+            for image_path in test_images:
+                dst_path = dst / image_path.name
+                if dst_path.exists():
+                    dst_path = dst / f"{image_path.stem}_{abs(hash(str(image_path))) % 100000}{image_path.suffix}"
+                shutil.copy2(image_path, dst_path)
+            print(f"  {grade} test: {len(test_images)}")
+    else:
+        print("\nNo test folder found - skipping.")
 
     return out
 
